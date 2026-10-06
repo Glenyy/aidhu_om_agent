@@ -1,6 +1,6 @@
-// S01 前端构建配置。
-// root 指向 src/frontend，构建产物输出到项目根 dist/frontend。
-// /api 代理到本地后端；业务 API 在 S06 实现。
+// 前端构建配置（S01 建立，S03-07 起接入真实接口）。
+// root 指向 src/frontend，构建产物输出到项目根 dist/frontend（由 `serve` 直接托管）。
+// dev 时 /api 代理到本地后端；后端用 `python -m aidhu_om_agent serve` 启动。
 
 import vue from '@vitejs/plugin-vue';
 import { defineConfig } from 'vite';

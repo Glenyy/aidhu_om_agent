@@ -1,4 +1,4 @@
-/* S01 全局样式：只保证骨架可读，业务样式到页面阶段再完善。 */
+/* 全局样式：S01 建立骨架样式，S03-07 起供判别页使用（页面内样式在各自 SFC 中）。 */
 
 :root {
   color-scheme: light;
@@ -19,8 +19,4 @@ body {
   margin: 0;
   font-size: 1.125rem;
   font-weight: 600;
-}
-
-.scaffold-card__table {
-  margin-top: 1rem;
 }

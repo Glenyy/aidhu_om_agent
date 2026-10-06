@@ -1,10 +1,10 @@
 # 实际目录与生成清单
 
-更新日期：2026-10-06。基线：v2.3 规划；实施入口 v1.2，S01 阶段文档 v1.2，其余阶段 v1.0。状态：**S01 已实现并通过自动化审阅，待手动审阅（未验收）**；S02—S09 未开始。
+更新日期：2026-10-06。基线：v2.3 规划；实施入口 v2.1，S01 阶段文档 v1.3，S02 阶段文档 v1.3，S03 阶段文档 v1.6，S06 阶段文档 v1.1，其余阶段 v1.0。状态：**S01、S02、S03 三个阶段均已实现、通过自动化审阅并经用户验收（阶段已接受）**——S02 与 S03 由用户在同一次界面操作中一并验收，S03 另有返工轮次（R-1—R-6）经 r02 自动化审阅与用户复验后接受；S04—S09 未开始、未批准（S04 的启动前置已满足，但仍须先讨论批准其小步骤）。
 
-初次骨架新增 50 个目录、94 个文件（含 23 个 .gitkeep）。2026-10-05 追加实施阶段、模板和规则；2026-10-06 追加交接检查、用户 Conda 依赖清单、AGENTS 入口及接手/环境规则；同日实现 S01（后端配置/日志、前端骨架、单测与构建产物、锁文件）并生成自动化与手动审阅文档。原 plan 保持不变。
+初次骨架新增 50 个目录、94 个文件（含 23 个 .gitkeep）。2026-10-05 追加实施阶段、模板和规则；2026-10-06 追加交接检查、用户 Conda 依赖清单、AGENTS 入口及接手/环境规则；同日实现 S01（后端配置/日志、前端骨架、单测与构建产物、锁文件）、生成自动化与手动审阅文档、记录用户验收结论，并将项目纳入 Git；同日完成 S02 输入解析与预检实现、生成 S02 自动化与手动审阅文档；同日按用户要求把手动验证改为**只经前端界面**，相应更新审阅与阶段执行规则、调整 S03 范围（新增界面骨架与模拟模式）并同步各状态文档；同日实现 S03（模型适配、两阶段判别、提示词、重试与预算、模拟模式、界面骨架与样例下载接口），在批准预算内完成真实服务兼容实测（10 次调用），生成 S03 自动化审阅报告与**界面版**手动指南（一次操作一并验收 S02 与 S03）。原 plan 保持不变。
 
-当前项目根目录之下（不含根目录自身）共 63 个目录、144 个文件，其中 26 个 .gitkeep、13 个原 plan 文件；计数不含 node_modules、.pytest_cache 与 __pycache__。下树展示实际路径，隐藏 .gitkeep；空目录不表示功能已实现。
+当前项目根目录之下（不含根目录自身）共 67 个目录、164 个文件，其中 26 个 .gitkeep、13 个原 plan 文件；计数不含 .git、node_modules、.pytest_cache 与 __pycache__，含本机 `memory/` 记忆目录、`dist/frontend` 构建产物与 `outputs/s02_samples/` 合成样例（后两者不进版本库）。下树展示实际路径，隐藏 .gitkeep；空目录不表示功能已实现。
 
 ## 实际目录
 
@@ -49,11 +49,25 @@ aidhu_om_agent/
 │   │   ├── preparations/
 │   │   ├── reviews/
 │   │   │   ├── automated/
-│   │   │   │   └── S01/
-│   │   │   │       └── r01-自动化审阅.md
+│   │   │   │   ├── S01/
+│   │   │   │   │   └── r01-自动化审阅.md
+│   │   │   │   ├── S02/
+│   │   │   │   │   └── r01-自动化审阅.md
+│   │   │   │   └── S03/
+│   │   │   │       ├── r01-自动化审阅.md
+│   │   │   │       └── r02-自动化审阅.md
 │   │   │   └── manual/
-│   │   │       └── S01/
-│   │   │           └── r01-手动操作审阅.md
+│   │   │       ├── S01/
+│   │   │       │   ├── r01-手动操作审阅.md
+│   │   │       │   └── r01-用户审阅结果.md
+│   │   │       ├── S02/
+│   │   │       │   ├── r01-手动操作审阅.md
+│   │   │       │   └── r01-用户审阅结果.md
+│   │   │       └── S03/
+│   │   │           ├── r01-手动操作审阅.md
+│   │   │           ├── r01-用户审阅结果.md
+│   │   │           ├── r02-手动操作审阅.md
+│   │   │           └── r02-用户审阅结果.md
 │   │   ├── stages/
 │   │   │   ├── S01-工程基础与运行环境.md
 │   │   │   ├── S02-输入与核心数据合同.md
@@ -79,6 +93,7 @@ aidhu_om_agent/
 │   └── TESTING.md
 ├── logs/
 ├── outputs/
+│   └── s02_samples/
 ├── plan/
 │   ├── assets/
 │   │   ├── AIDHU回答判别Agent流程图-v1.0.png
@@ -102,6 +117,8 @@ aidhu_om_agent/
 │   ├── aidhu_om_agent/
 │   │   ├── agent/
 │   │   │   ├── __init__.py
+│   │   │   ├── diagnostics.py
+│   │   │   ├── mock_samples.py
 │   │   │   ├── pipeline.py
 │   │   │   ├── stage1.py
 │   │   │   ├── stage2.py
@@ -112,9 +129,11 @@ aidhu_om_agent/
 │   │   │   │   ├── artifacts.py
 │   │   │   │   ├── jobs.py
 │   │   │   │   ├── runs.py
+│   │   │   │   ├── samples.py
 │   │   │   │   └── uploads.py
 │   │   │   ├── __init__.py
 │   │   │   ├── app.py
+│   │   │   ├── responses.py
 │   │   │   └── schemas.py
 │   │   ├── evaluation/
 │   │   │   ├── __init__.py
@@ -123,6 +142,7 @@ aidhu_om_agent/
 │   │   ├── excel/
 │   │   │   ├── __init__.py
 │   │   │   ├── reader.py
+│   │   │   ├── samples.py
 │   │   │   └── writer.py
 │   │   ├── llm/
 │   │   │   ├── __init__.py
@@ -144,7 +164,9 @@ aidhu_om_agent/
 │   │   ├── services/
 │   │   │   ├── __init__.py
 │   │   │   ├── batches.py
-│   │   │   └── exports.py
+│   │   │   ├── exports.py
+│   │   │   ├── judging.py
+│   │   │   └── uploads.py
 │   │   ├── storage/
 │   │   │   ├── migrations/
 │   │   │   ├── __init__.py
@@ -157,15 +179,17 @@ aidhu_om_agent/
 │   │   └── worker.py
 │   └── frontend/
 │       ├── api/
+│       │   └── client.ts
 │       ├── components/
 │       ├── composables/
 │       ├── pages/
-│       │   └── HomeView.vue
+│       │   └── JudgeView.vue
 │       ├── router/
 │       │   └── index.ts
 │       ├── styles/
 │       │   └── main.css
 │       ├── types/
+│       │   └── api.ts
 │       ├── App.vue
 │       ├── env.d.ts
 │       ├── index.html
@@ -173,10 +197,24 @@ aidhu_om_agent/
 ├── tests/
 │   ├── e2e/
 │   ├── fixtures/
+│   │   └── excel_samples.py
 │   ├── integration/
+│   │   ├── test_api_s03.py
+│   │   └── test_real_service_s03.py
+│   ├── conftest.py
 │   └── unit/
 │       ├── backend/
-│       │   └── test_config.py
+│       │   ├── test_config.py
+│       │   ├── test_excel_reader.py
+│       │   ├── test_excel_samples.py
+│       │   ├── test_judging.py
+│       │   ├── test_llm_client.py
+│       │   ├── test_mock_samples.py
+│       │   ├── test_model_output_parsing.py
+│       │   ├── test_pipeline.py
+│       │   ├── test_qa_schema.py
+│       │   ├── test_stage_messages.py
+│       │   └── test_validation.py
 │       └── frontend/
 ├── .env.example
 ├── .gitignore
@@ -197,24 +235,31 @@ aidhu_om_agent/
 
 | 类别 | 状态 |
 | --- | --- |
-| README、AGENTS、CLAUDE、docs 导航 | 已同步 S01 实现/审阅进度和用户环境决定 |
-| docs/implementation/stages | 9 份阶段文档、43 个小步骤；S01 为 v1.2 且已批准实施，S02—S09 未批准开发 |
+| README、AGENTS、CLAUDE、docs 导航 | 已同步 S01 验收结论、S02/S03 实现与待审阅状态、**手动验证改为只经前端界面的决定**、用户环境决定和 Git 仓库事实 |
+| docs/implementation/stages | 9 份阶段文档、43 个小步骤；S01 为 v1.3 且阶段已接受，S02 为 v1.3 且阶段已接受，S03 为 v1.6 且 S03-01—S03-07（含 §0.2、§0.3 追加项与 §0.4 返工）已实现、经返工复验后阶段已接受，S06 为 v1.1 且范围缩小，其余未批准开发 |
 | docs/implementation/handoffs | S01 前置检查、Conda 依赖说明与版本解析记录；不是阶段完成报告 |
 | docs/implementation/templates | 开发前方案（已弃用）、自动化报告、手动指南三份模板 |
-| reviews/automated/S01、reviews/manual/S01 | 已生成 r01 自动化审阅报告与待用户操作的手动指南；用户结果未反馈 |
+| reviews/automated/S01、reviews/manual/S01 | r01 自动化审阅报告（通过）、r01 手动指南（结果表用户未逐项填写）、r01 用户审阅结果（**接受**） |
+| reviews/automated/S02、reviews/manual/S02 | r01 自动化审阅报告（**通过**，含 3 项披露与 1 项 S01 遗留问题）、r01 手动指南（11 步，命令均已实跑，**已标注被界面验证取代、仅作排错参考**）；用户结果尚未生成 |
+| reviews/automated/S03、reviews/manual/S03 | r01 自动化审阅报告（**通过**；含真实调用 10/10 次披露、1 项非阻塞遗留与 2 项同轮复审，其一为用户界面操作后修复的终态显示文案）、r01 手动指南（**界面版 14 步**，A 组复验 S02、B 组复验 S03，默认全程模拟模式）、r01 用户审阅结果（**接受**，与 S02 同一次界面操作） |
 | preparations | 用户 2026-10-06 决定不再新建；保持空目录 |
 | .claude/rules | 四份路径规则、四份全项目执行/审阅/接手/环境规则 |
 | requirements.in、requirements.txt | 直接依赖范围与解析生成的 36 个精确版本；用户环境实测 36/36 匹配、`pip check` 干净 |
 | package.json、pyproject.toml | 已配置构建、脚本与固定版本依赖；后端可编辑安装通过 |
 | Vite、TypeScript 配置 | 路径与构建配置就绪；`pnpm typecheck`、`pnpm build` 均通过 |
 | .env.example、config.example.toml | 无密钥模板；配置解析、缺失提示与脱敏经单测验证 |
-| Python 配置与日志、CLI 入口 | config.py 与 `--version`/`--check-config` 已实现；其余模块与业务命令仍占位 |
-| 前端入口与占位页 | main.ts、App.vue、router、HomeView 已实现（工具链占位页，非业务页面） |
-| SQL、业务提示词 | 占位，无业务实现 |
+| Python 配置与日志、CLI 入口 | config.py 与 `--version`/`--check-config` 已实现；S02 增加只读 `inspect`；S03 增加 `serve`（界面服务，默认 127.0.0.1:8000）；`run/resume/export/evaluate` 仍为未实现提示 |
+| S02 输入解析（excel/reader.py、schemas/qa.py、schemas/judgement.py、agent/validation.py） | 已实现：13 列读取、工作表选择、批次级阻断、逐行部分失败、编号与换行归一化、三分类枚举与引用位置校验；不调模型、不落库、不改写原文件 |
+| S03 判别与模型适配（agent/{stage1,stage2,pipeline,validation,diagnostics,mock_samples}.py、llm/{client,errors}.py、prompts/*.md、schemas/analysis.py） | 已实现：阶段一仅 q+全部 ref、阶段二含 q/a/全部原 ref/阶段一结果；每次调用前记账、每阶段最多 3 次（含首次）并退避，非可重试错误立即失败且**不生成标签**；阶段一原结果与阶段二更正分别保留；模拟模式为确定性合成响应（`simulated: true`）。**2026-10-06 返工**：校验失败**留存被拒的原始输出**（仅 `content`，非推理链；`raw_output`/`raw_output_truncated`）；`ValidationError` 带 `kind` 分类用于选重试反馈措辞；`diagnostics.py` 提供只报事实的字符级摘录诊断；提示词与 schema 版本升至 `1.1`；新增强制失败模拟情境（显式编号 `FF-1` 命中，**既有五情境映射不变**） |
+| S03 接口与界面（api/{app,responses}.py、api/routes/{samples,uploads,jobs}.py、services/{uploads,judging}.py、frontend/pages/JudgeView.vue） | 已实现最小闭环：上传 → 预检 → 判一条 → 轮询结果，以及样例清单与下载。**均为进程内存态，重启即丢**；`/api/judge` 为临时接口，S06 由 `/api/runs/...` 体系取代 |
+| 业务提示词（prompts/stage1.md、stage2.md） | 已实现（S03）；三分类枚举仍在 Python 包内，不由提示词定义 |
+| 前端入口与业务页（S03-07） | main.ts、App.vue、router、JudgeView 已实现（「上传 → 预检 → 判一条」单页，路由 `/`）；api/client.ts 与 types/api.ts 为接口封装与类型；模拟模式为默认，真实模式需二次确认。S01 占位页 HomeView.vue 已删除。批次列表/详情、进度、恢复、导出下载仍属 S06 |
+| SQL | 占位，无业务实现（持久化属 S04） |
 | 三个 PowerShell 脚本 | 明确报未实现，不启动/停止服务 |
-| data、logs、outputs | 预留，无业务运行数据 |
-| dist/frontend | 有真实构建产物（index.html、assets/index-*.js/.css）；每次构建会清空该目录 |
-| tests | 22 项后端配置单测通过；集成/E2E/前端测试仍预留 |
+| data、logs、outputs | `outputs/s02_samples/` 为 S02 手动审阅步骤 1 生成的合成样例；`data/runtime/` 为实跑证据与冒烟脚本（已被忽略，非业务数据）；**`data/runtime/judge-diagnostics/`（2026-10-06 返工新增）为判别失败的诊断产物**，每个失败任务一份 `judge-<job_id>.json`（只含 job/记录标识、时间、模型与版本、各次尝试结果与被拒输出、摘录的字符级事实；**不含凭据、不含推理链**），成功且无被拒尝试时不生成；仍无业务运行数据 |
+| configs/config.local.toml、.env | **本机真实配置与凭据**，两者均被 `.gitignore` 忽略、不进版本库；`configs/` 下只提交无密钥模板。凭据只在后端运行时读取，快照只暴露 `api_key_present` |
+| dist/frontend | 有真实构建产物（index.html、assets/index-BCkl9iws.js、assets/index-8cRK3lei.css）；每次构建会清空该目录，并会删除其中的 `.gitkeep`（已知 S01 遗留问题，见 S02 审阅报告 §4） |
+| tests | **349 passed, 2 skipped（收集 351）**（2026-10-06 返工后全量）：配置 22、Excel 输入 26、样例 21、标签与校验 41、文本归一化 55、阶段消息构造 17、流水线重试与预算 26、判别服务与诊断 9、模拟客户端，以及 `tests/integration/test_api_s03.py` 的接口级用例 33；`test_real_service_s03.py` 为真实调用用例，**默认跳过**（`AIDHU_REAL_CALLS=1` 才跑）；E2E 与前端测试仍预留 |
 | pnpm-lock.yaml、pnpm-workspace.yaml | 前端锁文件与 pnpm 12 设置（`allowBuilds: esbuild`） |
 | 可选技能、子代理、CI、ADR、docs/plans | 仅预留目录，未启用内容 |
 
@@ -224,8 +269,8 @@ aidhu_om_agent/
 - CLAUDE.local.md、.claude/settings.json、settings.local.json、.env、config.local.toml：按实际需要生成，个人文件不提交。
 - .claude/skills/database-migration/SKILL.md、.claude/agents/reviewer.md、.github/workflows/ci.yml：有需要再启用。
 - data/state.sqlite3：存储实现后生成，没有假数据库。
-- S01 用户审阅结果、S02 及以后各阶段的方案/批准、自动化审阅与手动指南：到所属阶段按真实状态生成。
+- S04 及以后各阶段的方案/批准、自动化审阅与手动指南：到所属阶段按真实状态生成（S01—S03 的用户审阅结果均已生成）。
 
-[实施入口](implementation/README.md) · [S01 自动化审阅](implementation/reviews/automated/S01/r01-自动化审阅.md) · [S01 手动操作审阅](implementation/reviews/manual/S01/r01-手动操作审阅.md) · [环境与依赖](implementation/handoffs/S01-开发环境与依赖清单.md) · [交接状态](HANDOFF.md)
+[实施入口](implementation/README.md) · [S01 自动化审阅](implementation/reviews/automated/S01/r01-自动化审阅.md) · [S01 用户审阅结果](implementation/reviews/manual/S01/r01-用户审阅结果.md) · [S02 自动化审阅](implementation/reviews/automated/S02/r01-自动化审阅.md) · [S02 手动操作审阅](implementation/reviews/manual/S02/r01-手动操作审阅.md) · [S02 用户审阅结果](implementation/reviews/manual/S02/r01-用户审阅结果.md) · [S03 自动化审阅 r02](implementation/reviews/automated/S03/r02-自动化审阅.md) · [S03 手动操作审阅（界面版 r02）](implementation/reviews/manual/S03/r02-手动操作审阅.md) · [S03 用户审阅结果 r02](implementation/reviews/manual/S03/r02-用户审阅结果.md) · [环境与依赖](implementation/handoffs/S01-开发环境与依赖清单.md) · [交接状态](HANDOFF.md)
 
-目录与文档生成不等于业务开发完成。S01 工程基础已实现并通过自动化审阅，但**尚未经用户手动审阅验收**，业务判别流程（Excel、模型、持久化、导出、API/页面）仍未实现；S02 须待用户接受 S01 后再讨论。
+目录与文档生成不等于业务开发完成。S01 工程基础、S02 的输入解析与预检、S03 的两阶段判别与界面骨架均已实现、通过自动化审阅并经用户验收（**三个阶段均为阶段已接受**；S02 与 S03 为同一次界面操作一并验收，S03 的返工经 r02 复审与用户复验后接受）。持久化与 worker、批次与恢复、导出与下载仍未实现，属 S04—S06，**尚未讨论、未批准**；**用户手动验证只经前端界面，每个阶段须交付界面验证面**。

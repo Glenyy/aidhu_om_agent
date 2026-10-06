@@ -1,14 +1,17 @@
-# Proposed configuration template only; parser and service compatibility are not implemented.
-# No credentials belong in this file. Fill actual addresses/model IDs during development.
+# 配置模板：复制为 configs/config.local.toml（不提交）或 configs/config.toml。
+# 复制后按实际服务填写 base_url；**凭据不写在本文件**，只放项目根的 .env。
+# 模型 ID 为 2026-10-06 S03-06 实测可用值（硅基流动），换服务需同步改 ID。
 [models.stage1]
+# 例：base_url = "https://api.siliconflow.cn/v1"
 base_url = ""
-model = "deepseek-v3"
+model = "deepseek-ai/DeepSeek-V3"
 api_key_env = "AIDHU_STAGE1_API_KEY"
 timeout_seconds = 120
 
 [models.stage2]
+# 例：base_url = "https://api.siliconflow.cn/v1"
 base_url = ""
-model = "deepseek-r1"
+model = "deepseek-ai/DeepSeek-R1"
 api_key_env = "AIDHU_STAGE2_API_KEY"
 timeout_seconds = 300
 

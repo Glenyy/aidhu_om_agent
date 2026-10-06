@@ -1,16 +1,17 @@
-// S01 只注册骨架占位路由；业务路由在 S06 按其阶段文档实现。
+// S03-07：首页为判别页（上传 → 预检 → 判一条）。
+// 批次列表、详情与导出路由在 S06 按其阶段文档补充。
 
 import { createRouter, createWebHistory } from 'vue-router';
 
-import HomeView from '../pages/HomeView.vue';
+import JudgeView from '../pages/JudgeView.vue';
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     {
       path: '/',
-      name: 'home',
-      component: HomeView,
+      name: 'judge',
+      component: JudgeView,
     },
   ],
 });

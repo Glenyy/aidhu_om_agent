@@ -1,5 +1,5 @@
-// 前端入口：S01 只验证工具链（Vue + Router + Element Plus 可加载、可构建）。
-// 上传、进度、结果等业务页面在 S06 实现。
+// 前端入口（S01 建立）。S03-07 起首页为 JudgeView（上传 → 预检 → 判一条）；
+// 批次列表、详情与导出页面在 S06 实现。
 
 import { createApp } from 'vue';
 import ElementPlus from 'element-plus';

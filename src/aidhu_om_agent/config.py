@@ -129,6 +129,19 @@ class LimitsConfig:
     max_records: int
 
 
+#: 内置保护值；不新增配置项，只作为缺少 configs/config.toml 时的回落。
+_DEFAULT_LIMITS = LimitsConfig(max_upload_bytes=52428800, max_records=1000)
+
+
+def default_limits() -> LimitsConfig:
+    """返回内置保护值。
+
+    只读解析入口（`python -m aidhu_om_agent inspect`）在用户尚未从模板复制
+    `configs/config.toml` 时使用；存在配置时一律以配置值为准。
+    """
+    return _DEFAULT_LIMITS
+
+
 @dataclass(frozen=True)
 class PathsConfig:
     """全部为绝对路径，与当前工作目录无关。"""
@@ -202,7 +215,10 @@ _DEFAULTS: dict[str, object] = {
         "max_attempts_per_stage_campaign": 3,
         "retry_backoff_seconds": [2, 4],
     },
-    "limits": {"max_upload_bytes": 52428800, "max_records": 1000},
+    "limits": {
+        "max_upload_bytes": _DEFAULT_LIMITS.max_upload_bytes,
+        "max_records": _DEFAULT_LIMITS.max_records,
+    },
     "paths": {
         "database": "data/state.sqlite3",
         "uploads": "data/uploads",
