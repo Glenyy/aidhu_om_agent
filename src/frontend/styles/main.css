@@ -1,0 +1,26 @@
+/* S01 全局样式：只保证骨架可读，业务样式到页面阶段再完善。 */
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.app-shell__header {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--el-border-color);
+}
+
+.app-shell__title {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.scaffold-card__table {
+  margin-top: 1rem;
+}

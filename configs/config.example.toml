@@ -1,0 +1,33 @@
+# Proposed configuration template only; parser and service compatibility are not implemented.
+# No credentials belong in this file. Fill actual addresses/model IDs during development.
+[models.stage1]
+base_url = ""
+model = "deepseek-v3"
+api_key_env = "AIDHU_STAGE1_API_KEY"
+timeout_seconds = 120
+
+[models.stage2]
+base_url = ""
+model = "deepseek-r1"
+api_key_env = "AIDHU_STAGE2_API_KEY"
+timeout_seconds = 300
+
+[credentials]
+fallback_env = "AIDHU_API_KEY"
+
+[execution]
+concurrency = 1
+max_attempts_per_stage_campaign = 3
+retry_backoff_seconds = [2, 4]
+
+[limits]
+max_upload_bytes = 52428800
+max_records = 1000
+
+[paths]
+database = "data/state.sqlite3"
+uploads = "data/uploads"
+runtime = "data/runtime"
+outputs = "outputs"
+logs = "logs"
+frontend_dist = "dist/frontend"

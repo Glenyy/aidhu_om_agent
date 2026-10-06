@@ -1,0 +1,5 @@
+# pnpm 12 起，设置项从 package.json 的 "pnpm" 字段移到本文件。
+# esbuild 需要运行安装脚本以下载平台二进制（Vite 构建依赖）。
+# 仅白名单该包，其余依赖的构建脚本仍被拦截。
+allowBuilds:
+  esbuild: true

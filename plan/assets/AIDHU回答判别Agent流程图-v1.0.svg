@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2160" height="2500" viewBox="0 0 2160 2500" role="img" aria-labelledby="title desc">
+<title id="title">AIDHU 回答判别 Agent 项目流程图</title>
+<desc id="desc">输入无判断列的 Excel。阶段一根据问题和引用分析资料，阶段二结合回答、原始引用及阶段一结果进行三分类，再导出分类结果与复核清单。</desc>
+<rect width="2160" height="2500" fill="white"/>
+<defs><marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M 1 1 L 11 6 L 1 11 Z" fill="#7A8DA5"/></marker></defs>
+<polyline points="1080,338 1080,400" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="1080,496 1080,560" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="1080,714 1080,778" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="1080,918 1080,982" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="1080,1136 1080,1200" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="710,1300 360,1300 360,1760" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="1080,1400 1080,1440 1500,1440 1500,1480" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="1140,1580 1080,1580 1080,1760" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="1500,1680 1500,1718 1800,1718 1800,1760" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="360,1955 360,2020 1080,2020 1080,2070" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="1080,1955 1080,2070" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="1800,1955 1800,2020 1080,2020 1080,2070" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<polyline points="1080,2180 1080,2240" fill="none" stroke="#7A8DA5" stroke-width="4" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="1080" y="84" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="62" font-weight="700" fill="#152A45">AIDHU 回答判别 Agent 项目流程</text>
+<text x="1080" y="158" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="31" font-weight="400" fill="#50647B">B 分阶段判断  ·  本地 Excel 批处理  ·  两次模型调用</text>
+<rect x="520" y="218" width="1120" height="120" rx="20" fill="#F7F9FC" stroke="#C6D2E1" stroke-width="2"/>
+<text x="1080.0" y="261.2" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="40" font-weight="700" fill="#152A45">输入 Excel</text>
+<text x="1080.0" y="304.4" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="29" font-weight="400" fill="#50647B">编号、q、a、ref1—ref10</text>
+<rect x="655" y="400" width="850" height="96" rx="20" fill="#F7F9FC" stroke="#C6D2E1" stroke-width="2"/>
+<text x="1080.0" y="448.0" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="36" font-weight="700" fill="#152A45">校验必要字段与编号</text>
+<rect x="520" y="560" width="1120" height="154" rx="20" fill="#EDF4FF" stroke="#9BB9EA" stroke-width="2"/>
+<text x="1080.0" y="615.44" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="40" font-weight="700" fill="#2457B7">阶段一 · 资料充分性分析</text>
+<text x="1080.0" y="670.88" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="29" font-weight="400" fill="#50647B">输入：q + 10 个 ref（不读取 a）</text>
+<rect x="520" y="778" width="1120" height="140" rx="20" fill="#F7F9FC" stroke="#C6D2E1" stroke-width="2"/>
+<text x="1080.0" y="828.4" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="40" font-weight="700" fill="#152A45">校验并保存证据分析</text>
+<text x="1080.0" y="878.8" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="29" font-weight="400" fill="#50647B">作答要点、支撑 ref、缺失信息、资料充分性</text>
+<rect x="520" y="982" width="1120" height="154" rx="20" fill="#EDF4FF" stroke="#9BB9EA" stroke-width="2"/>
+<text x="1080.0" y="1037.44" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="40" font-weight="700" fill="#2457B7">阶段二 · 答案检查与分类</text>
+<text x="1080.0" y="1092.88" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="29" font-weight="400" fill="#50647B">输入：q + a + 原始 ref + 阶段一结果</text>
+<polygon points="1080,1200.0 1450.0,1300 1080,1400.0 710.0,1300" fill="#F5F7FB" stroke="#AABBD1" stroke-width="2"/>
+<text x="1080" y="1278" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="34" font-weight="700" fill="#152A45">能否确认 a 基本正确</text>
+<text x="1080" y="1324" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="34" font-weight="700" fill="#152A45">且回答了核心问题？</text>
+<text x="620" y="1260" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="31" font-weight="400" fill="#50647B">是</text>
+<text x="1270" y="1410" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="29" font-weight="400" fill="#50647B">否 / 无法确认</text>
+<polygon points="1500,1480.0 1860.0,1580 1500,1680.0 1140.0,1580" fill="#F5F7FB" stroke="#AABBD1" stroke-width="2"/>
+<text x="1500" y="1558" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="34" font-weight="700" fill="#152A45">ref 是否足以</text>
+<text x="1500" y="1605" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="34" font-weight="700" fill="#152A45">回答核心问题？</text>
+<text x="1037" y="1670" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="31" font-weight="400" fill="#50647B">是</text>
+<text x="1660" y="1682" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="31" font-weight="400" fill="#50647B">否</text>
+<rect x="60" y="1760" width="600" height="195" rx="20" fill="#EAF7F0" stroke="#ABD3BC" stroke-width="2"/>
+<text x="360" y="1820" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="40" font-weight="700" fill="#226547">回答正确</text>
+<text x="360" y="1882" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="28" font-weight="400" fill="#50647B">基本正确，并回答核心问题</text>
+<rect x="780" y="1760" width="600" height="195" rx="20" fill="#FFF0EE" stroke="#E4B9B4" stroke-width="2"/>
+<text x="1080" y="1820" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="38" font-weight="700" fill="#9C413B">检索到正确资料但回答错误</text>
+<text x="1080" y="1882" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="28" font-weight="400" fill="#50647B">资料足够，但答案有关键错误或遗漏</text>
+<rect x="1500" y="1760" width="600" height="195" rx="20" fill="#FFF6E5" stroke="#E6C894" stroke-width="2"/>
+<text x="1800" y="1820" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="38" font-weight="700" fill="#8A6018">未检索到正确资料</text>
+<text x="1800" y="1874" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="28" font-weight="400" fill="#50647B">答案看似合理但无法验证时</text>
+<text x="1800" y="1914" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="28" font-weight="400" fill="#50647B">标记“需人工复核”</text>
+<rect x="520" y="2070" width="1120" height="110" rx="20" fill="#F7F9FC" stroke="#C6D2E1" stroke-width="2"/>
+<text x="1080.0" y="2125.0" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="36" font-weight="700" fill="#152A45">校验分类、理由与证据，保存结果</text>
+<rect x="520" y="2240" width="1120" height="140" rx="20" fill="#F7F9FC" stroke="#C6D2E1" stroke-width="2"/>
+<text x="1080.0" y="2290.4" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="40" font-weight="700" fill="#152A45">导出分类结果与复核清单</text>
+<text x="1080.0" y="2340.8" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="29" font-weight="400" fill="#50647B">编号、判断、判别理由、证据、复核标记</text>
+<text x="1080" y="2440" text-anchor="middle" dominant-baseline="central" font-family="Microsoft YaHei, Noto Sans CJK SC, sans-serif" font-size="27" font-weight="400" fill="#50647B">“需人工复核”是独立标记；人工修订时保留原预测，业务判断始终只有三类。</text>
+</svg>

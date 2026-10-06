@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aidhu-om-agent"
+version = "0.0.0"
+description = "AIDHU 回答判别 Agent：两阶段模型判别与人工复核"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "openai>=2,<3",
+    "pydantic>=2.9,<3",
+    "openpyxl>=3.1,<4",
+    "python-dotenv>=1,<2",
+    "python-multipart>=0.0.18,<1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8,<10",
+    "httpx>=0.27,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aidhu_om_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit/backend", "tests/integration"]

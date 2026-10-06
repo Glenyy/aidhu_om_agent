@@ -1,0 +1,54 @@
+# Personal assistant configuration
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Auto memory: machine-local notes, target set by autoMemoryDirectory
+memory/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+configs/config.local.toml
+
+# Python and tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+
+# Node and frontend
+node_modules/
+.pnpm-store/
+.vite/
+*.tsbuildinfo
+playwright-report/
+test-results/
+coverage/
+
+# Runtime data: keep directory markers only
+data/**
+!data/**/
+!data/**/.gitkeep
+outputs/**
+!outputs/**/
+!outputs/**/.gitkeep
+logs/**
+!logs/**/
+!logs/**/.gitkeep
+dist/**
+!dist/**/
+!dist/**/.gitkeep
+
+# Editor and OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
