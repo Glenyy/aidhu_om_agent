@@ -59,6 +59,10 @@ RAW_OUTPUT_LIMIT = 8000
 _RAW_OUTPUT_HEAD = 6000
 _RAW_OUTPUT_TAIL = 2000
 
+#: 截断标记。库里不另存「是否截断」的列（plan/09 §4 只存正文），所以读取侧
+#: （S06 记录详情的 `raw_output_truncated`）靠它判断，两处必须是同一个字符串。
+RAW_OUTPUT_ELLIPSIS = "\n……（中间已省略）……\n"
+
 
 @dataclass(frozen=True)
 class StageAttempt:
@@ -266,7 +270,7 @@ def _clip_raw_output(text: str | None) -> tuple[str | None, bool]:
         return None, False
     if len(text) <= RAW_OUTPUT_LIMIT:
         return text, False
-    return text[:_RAW_OUTPUT_HEAD] + "\n……（中间已省略）……\n" + text[-_RAW_OUTPUT_TAIL:], True
+    return text[:_RAW_OUTPUT_HEAD] + RAW_OUTPUT_ELLIPSIS + text[-_RAW_OUTPUT_TAIL:], True
 
 
 def _backoff_seconds(execution: ExecutionConfig, attempt: int) -> float:
@@ -580,6 +584,7 @@ def result_to_payload(result: RecordResult) -> dict[str, Any]:
 __all__ = [
     "CODE_BUDGET_EXHAUSTED",
     "CODE_OUTPUT_INVALID",
+    "RAW_OUTPUT_ELLIPSIS",
     "RAW_OUTPUT_LIMIT",
     "AttemptCompletion",
     "BudgetLedger",

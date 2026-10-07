@@ -1,11 +1,16 @@
-"""S03-07：判一条与任务查询接口（最小集）。
+"""任务查询接口（S03-07；S06-02 起读持久化任务）。
 
-- ``POST /api/judge``：提交一条记录进入判别，立即返回 ``job_id``。
-- ``GET /api/jobs/{job_id}``：查询任务状态、当前阶段与结果。
+- ``GET /api/jobs/{job_id}``：按 `job_id` 查 `jobs` 表，返回 [plan/08 §7] 的任务字段
+  （`job_id`、`run_id`、`kind`、`mode`、`status`、`created_at`、`started_at`、
+  `finished_at`、`current_record_key`、`current_stage`、`error`、`result`）。
 
-**`/api/judge` 是临时接口，不属于最终合同**：S06 由
-``/api/runs/{run_id}/records/{record_key}`` 体系取代。任务状态为内存态，
-**进程重启即丢失，本阶段不承诺中断恢复**（见 `services/judging.py`）。
+**S03-07 的 ``POST /api/judge``（判一条）已删除**：判一条由整批 + 批次记录详情取代，
+界面不再持有进程内任务状态（S06 阶段文档 §0.2 第 1 项、§0.3 第 9 项）。S04 起任务本来
+就落在 `jobs` 表里，S03-07 的内存注册表查不到它们——本条改动把读法收敛到唯一一处。
+
+**``mode`` 不是模拟/真实**：判别任务是 `initial`／`resume`／`retry_failed`，导出任务是
+`automatic`／`manual`。界面**不得**用它判断模拟/真实；那要看批次详情的
+`call_statistics.*.simulated` 与 `execution_control.last_worker.mode`（§0.3 第 5 项）。
 """
 
 from __future__ import annotations
@@ -14,85 +19,26 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from ...agent.pipeline import record_key_of
-from ...config import AppConfig
-from ...services.batches import BatchError, load_parsed_input
-from ...services.judging import JudgeJobRegistry
-from ...services.uploads import UploadStore
-from ..deps import database_connection
+from ...services.batches import BatchError, job_detail
+from ...storage import Database
 from ..responses import fail, success
-from ..schemas import JudgeRequest
 
 router = APIRouter(tags=["jobs"])
 
 
-@router.post("/judge", status_code=202)
-async def create_judge(request: Request, payload: JudgeRequest) -> Any:
-    config: AppConfig = request.app.state.config
-    store: UploadStore = request.app.state.uploads
-    jobs: JudgeJobRegistry = request.app.state.jobs
-
-    validation = store.get_validation(payload.validation_id)
-    if validation is None:
-        return fail(
-            request,
-            404,
-            "NOT_FOUND",
-            f"未知 validation_id：{payload.validation_id}；请重新预检",
-        )
-
-    if validation.status != "passed":
-        return fail(
-            request,
-            409,
-            "INPUT_NOT_VALIDATED",
-            "该预检为 blocked，不能创建判别；请先修正输入后重新预检",
-        )
-
-    try:
-        with database_connection(request) as connection:
-            parsed = load_parsed_input(connection, payload.validation_id, config=config)
-    except BatchError as exc:
-        return fail(request, exc.http_status, exc.code, exc.message, exc.details or None)
-
-    record = next(
-        (
-            item
-            for item in parsed.valid_records()
-            if record_key_of(item) == payload.record_key
-        ),
-        None,
-    )
-    if record is None:
-        available = [record_key_of(item) for item in parsed.valid_records()]
-        return fail(
-            request,
-            404,
-            "NOT_FOUND",
-            f"预检结果中没有记录 {payload.record_key!r}",
-            details={"available_record_keys": available},
-        )
-
-    job = jobs.submit(
-        record=record,
-        validation_id=payload.validation_id,
-        record_key=payload.record_key,
-        mode=payload.mode,
-    )
-    return success(
-        request,
-        {"job_id": job.job_id, "mode": job.mode, "status": job.status},
-        status_code=202,
-    )
-
-
 @router.get("/jobs/{job_id}")
 async def get_job(request: Request, job_id: str) -> Any:
-    jobs: JudgeJobRegistry = request.app.state.jobs
-    job = jobs.get(job_id)
-    if job is None:
-        return fail(request, 404, "NOT_FOUND", f"未知 job_id：{job_id}")
-    return success(request, job.payload())
+    """任务状态、当前记录与阶段、受控错误与结果标识；**不含模型推理内容**。
+
+    任务不存在返回 404 `NOT_FOUND`——包括「刚被删掉的那个内存任务」，
+    这正是不再区分「内存任务」与「库任务」的收益。
+    """
+    database: Database = request.app.state.db
+    try:
+        payload = job_detail(database, job_id)
+    except BatchError as exc:
+        return fail(request, exc.http_status, exc.code, exc.message, exc.details or None)
+    return success(request, payload)
 
 
 __all__ = ["router"]

@@ -1,12 +1,15 @@
-"""S03-07 的接口集成测试：上传 → 预检 → 判一条 → 轮询任务。
+"""S03-07 的接口集成测试：上传 → 预检 → 样例下载。
 
-全部走 ``mock`` 模式，**不产生任何真实模型调用**；真实服务兼容性由 S03-06 的
-单独记录证明，不在自动化测试里触发。
+S06-02 删除了 ``POST /api/judge``（判一条），本文件里那条路径的用例随之删除：
+判一条由整批取代，批次侧的记录与详情用例在 `test_api_s06_records.py`，任务查询在
+`test_api_s06_jobs.py`。这里保留**上传与预检**的用例，并继续向其它测试文件提供
+`make_config`／`prepared_validation` 两个夹具函数。
+
+全部走模拟路径，**不产生任何真实模型调用**。
 """
 
 from __future__ import annotations
 
-import time
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -25,17 +28,12 @@ from aidhu_om_agent.config import (
 )
 from aidhu_om_agent.excel.reader import PREFERRED_SHEET
 from aidhu_om_agent.excel.samples import SAMPLES, get_sample
-from aidhu_om_agent.schemas.judgement import LABELS
 from fixtures.excel_samples import (
     PREFERRED_SHEET,
     all_invalid_workbook,
-    empty_refs_workbook,
     normal_workbook,
     partial_failure_workbook,
 )
-
-TERMINAL = {"completed", "partial_failed", "failed"}
-POLL_LIMIT = 100
 
 
 def make_config(
@@ -92,16 +90,6 @@ def upload_workbook(client: TestClient, path: Path, *, name: str | None = None) 
 
 def validate(client: TestClient, upload_id: str, sheet: str | None = None) -> Any:
     return client.post(f"/api/uploads/{upload_id}/validate", json={"sheet_name": sheet})
-
-
-def wait_for_job(client: TestClient, job_id: str) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    for _ in range(POLL_LIMIT):
-        payload = client.get(f"/api/jobs/{job_id}").json()["data"]
-        if payload["status"] in TERMINAL:
-            return payload
-        time.sleep(0.02)
-    raise AssertionError(f"任务未在预期内结束：{payload.get('status')}")
 
 
 def prepared_validation(client: TestClient, path: Path) -> tuple[str, dict[str, Any]]:
@@ -255,157 +243,6 @@ def test_validate_unknown_upload_returns_404(client: TestClient) -> None:
     assert response.json()["error"]["code"] == "NOT_FOUND"
 
 
-# ---------------------------------------------------------------- 判一条（模拟）
-
-
-def test_mock_judge_completes_with_label_and_details(client: TestClient, tmp_path: Path) -> None:
-    validation_id, data = prepared_validation(client, normal_workbook(tmp_path / "ok.xlsx"))
-    record_key = data["records"][0]["record_key"]
-
-    created = client.post(
-        "/api/judge",
-        json={"validation_id": validation_id, "record_key": record_key, "mode": "mock"},
-    )
-
-    assert created.status_code == 202
-    created_data = created.json()["data"]
-    assert created_data["job_id"]
-    # 后台线程可能已经开跑，提交响应里的状态不保证仍是 queued。
-    assert created_data["status"] in {"queued", "running", "completed"}
-
-    job = wait_for_job(client, created_data["job_id"])
-
-    assert job["status"] == "completed"
-    result = job["result"]
-    assert result["status"] == "completed"
-    assert result["label"] in LABELS
-    assert result["simulated"] is True
-    assert result["stage1"]["reason"]
-    assert result["stage2"]["reason"]
-    assert [attempt["stage"] for attempt in result["attempts"]] == ["stage1", "stage2"]
-    assert all(attempt["simulated"] for attempt in result["attempts"])
-
-
-def test_mock_judge_evidence_points_at_real_ref(client: TestClient, tmp_path: Path) -> None:
-    validation_id, data = prepared_validation(client, normal_workbook(tmp_path / "ok.xlsx"))
-
-    created = client.post(
-        "/api/judge",
-        json={
-            "validation_id": validation_id,
-            "record_key": data["records"][0]["record_key"],
-            "mode": "mock",
-        },
-    )
-    job = wait_for_job(client, created.json()["data"]["job_id"])
-
-    for item in job["result"]["stage1"]["evidence"]:
-        assert item["ref_id"].startswith("ref")
-        assert item["quote"]
-
-
-def test_mock_judge_record_without_refs_still_completes(client: TestClient, tmp_path: Path) -> None:
-    upload = upload_workbook(client, empty_refs_workbook(tmp_path / "norefs.xlsx")).json()["data"]
-    data = validate(client, upload["upload_id"]).json()["data"]
-    assert data["records"][0]["ref_count"] == 0
-
-    created = client.post(
-        "/api/judge",
-        json={
-            "validation_id": data["validation_id"],
-            "record_key": data["records"][0]["record_key"],
-            "mode": "mock",
-        },
-    )
-    job = wait_for_job(client, created.json()["data"]["job_id"])
-
-    assert job["status"] == "completed"
-    assert job["result"]["label"] == "未检索到正确资料"
-    assert job["result"]["stage1"]["evidence"] == []
-
-
-def test_default_mode_is_mock(client: TestClient, tmp_path: Path) -> None:
-    validation_id, data = prepared_validation(client, normal_workbook(tmp_path / "ok.xlsx"))
-
-    created = client.post(
-        "/api/judge",
-        json={"validation_id": validation_id, "record_key": data["records"][0]["record_key"]},
-    )
-
-    assert created.json()["data"]["mode"] == "mock"
-    job = wait_for_job(client, created.json()["data"]["job_id"])
-    assert job["mode"] == "mock"
-    assert job["result"]["simulated"] is True
-
-
-def test_judge_unknown_validation_returns_404(client: TestClient) -> None:
-    response = client.post(
-        "/api/judge", json={"validation_id": "无", "record_key": "1", "mode": "mock"}
-    )
-
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == "NOT_FOUND"
-
-
-def test_judge_blocked_validation_returns_409(client: TestClient, tmp_path: Path) -> None:
-    upload = upload_workbook(client, all_invalid_workbook(tmp_path / "bad.xlsx")).json()["data"]
-    data = validate(client, upload["upload_id"]).json()["data"]
-
-    response = client.post(
-        "/api/judge",
-        json={"validation_id": data["validation_id"], "record_key": "1", "mode": "mock"},
-    )
-
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "INPUT_NOT_VALIDATED"
-
-
-def test_judge_unknown_record_key_lists_available_keys(client: TestClient, tmp_path: Path) -> None:
-    validation_id, data = prepared_validation(client, normal_workbook(tmp_path / "ok.xlsx"))
-
-    response = client.post(
-        "/api/judge",
-        json={"validation_id": validation_id, "record_key": "不存在", "mode": "mock"},
-    )
-
-    assert response.status_code == 404
-    details = response.json()["error"]["details"]
-    assert details["available_record_keys"] == [
-        record["record_key"] for record in data["records"]
-    ]
-
-
-def test_unknown_job_returns_404(client: TestClient) -> None:
-    response = client.get("/api/jobs/不存在")
-
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == "NOT_FOUND"
-
-
-# ---------------------------------------------------------------- 真实模式的失败面
-
-
-def test_real_mode_without_credentials_fails_with_config_invalid(tmp_path: Path) -> None:
-    """真实模式在缺少服务地址/凭据时必须失败，且不给标签。"""
-    client = TestClient(create_app(make_config(tmp_path)))
-    validation_id, data = prepared_validation(client, normal_workbook(tmp_path / "ok.xlsx"))
-
-    created = client.post(
-        "/api/judge",
-        json={
-            "validation_id": validation_id,
-            "record_key": data["records"][0]["record_key"],
-            "mode": "real",
-        },
-    )
-    job = wait_for_job(client, created.json()["data"]["job_id"])
-
-    assert job["status"] == "partial_failed"
-    assert job["result"]["label"] is None
-    assert job["result"]["failure"]["code"] == "CONFIG_INVALID"
-    assert job["result"]["simulated"] is False
-
-
 # ---------------------------------------------------------------- 合成样例下载
 
 
@@ -485,73 +322,3 @@ def test_unknown_sample_returns_404_listing_available_names(client: TestClient) 
     assert body["error"]["code"] == "NOT_FOUND"
     for name in (sample.name for sample in SAMPLES):
         assert name in body["error"]["message"]
-
-
-# ------------------------------- 2026-10-06 返工：耗时可见与失败界面（模拟、零调用）
-
-
-def test_terminal_job_payload_carries_timing_fields(
-    client: TestClient, tmp_path: Path
-) -> None:
-    """「四分钟没动静」这类体验问题：界面要能显示已用时长与第几次尝试。"""
-    validation_id, data = prepared_validation(client, normal_workbook(tmp_path / "ok.xlsx"))
-    created = client.post(
-        "/api/judge",
-        json={
-            "validation_id": validation_id,
-            "record_key": data["records"][0]["record_key"],
-            "mode": "mock",
-        },
-    )
-    running = client.get(f"/api/jobs/{created.json()['data']['job_id']}").json()["data"]
-    assert "current_attempt" in running  # 轮询期间即可用
-
-    job = wait_for_job(client, created.json()["data"]["job_id"])
-    assert job["created_at"] and job["started_at"] and job["finished_at"]
-    assert job["created_at"] <= job["started_at"] <= job["finished_at"]
-    assert isinstance(job["elapsed_ms"], int) and job["elapsed_ms"] >= 0
-    assert job["current_stage"] is None
-    assert job["current_attempt"] is None
-
-
-def test_forced_failure_sample_reaches_failed_job_with_rejected_output(
-    client: TestClient, tmp_path: Path
-) -> None:
-    """界面按下「判一条」即可复现的技术失败：模拟模式、零真实调用。"""
-    download = client.get("/api/samples/forced-failure")
-    assert download.status_code == 200
-    upload = client.post(
-        "/api/uploads",
-        files={
-            "file": (
-                "forced-failure.xlsx",
-                download.content,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        },
-    )
-    assert upload.status_code == 201
-    data = validate(client, upload.json()["data"]["upload_id"]).json()["data"]
-    assert data["status"] == "passed"
-    assert [record["record_key"] for record in data["records"]] == ["FF-1"]
-
-    created = client.post(
-        "/api/judge",
-        json={"validation_id": data["validation_id"], "record_key": "FF-1", "mode": "mock"},
-    )
-    job = wait_for_job(client, created.json()["data"]["job_id"])
-    result = job["result"]
-
-    assert job["status"] == "partial_failed"
-    assert result["label"] is None
-    assert result["failure"]["code"] == "OUTPUT_INVALID"
-    assert result["failure"]["stage"] == "stage2"
-
-    rejected = [item for item in result["attempts"] if item["outcome"] == "validation_error"]
-    assert len(rejected) == 3
-    assert all(item["raw_output"] for item in rejected)
-    assert all(item["raw_output_truncated"] is False for item in rejected)
-
-    # 诊断产物落在 runtime 目录，供事后判读「模型写错了哪个字符」。
-    artifact = tmp_path / "runtime" / "judge-diagnostics" / f"judge-{job['job_id']}.json"
-    assert artifact.exists()

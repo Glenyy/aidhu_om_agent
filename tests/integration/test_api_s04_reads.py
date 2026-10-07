@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +25,7 @@ from test_api_s04 import create_run
 from aidhu_om_agent.agent.mock_samples import MockClient
 from aidhu_om_agent.api.app import create_app
 from aidhu_om_agent.excel.samples import FORCED_FAILURE_RECORD_ID, build_workbook_bytes, get_sample
+from aidhu_om_agent.llm.errors import ModelConfigError
 from aidhu_om_agent.services.batches import RUN_STATUSES
 from aidhu_om_agent.storage import Database
 from aidhu_om_agent.worker import MODE_MOCK, Worker
@@ -36,6 +39,24 @@ def auto_factory(record) -> MockClient:  # noqa: ANN001 - 只用于构造模拟�
     会把样例变成一个测试作者都没想到的批次。
     """
     return MockClient(record.to_qa_record())
+
+
+class InvalidConfigClient:
+    """系统性故障：每次调用都报配置无效（认证类，属 `SYSTEMIC_FAILURE_CODES`）。
+
+    本地定义而不是从单测里 import——单测目录不在集成测试的导入路径上，
+    而且这里要的只是「一调用就抛系统性错误」这一个行为。
+    """
+
+    def __init__(self, record: Any) -> None:
+        self.record = record
+
+    def call(self, messages, stage):  # noqa: ANN001, ANN201 - 只用于抛错
+        raise ModelConfigError("缺少服务地址或凭据", stage=stage)
+
+
+def invalid_config_factory(record: Any) -> InvalidConfigClient:
+    return InvalidConfigClient(record.to_qa_record())
 
 
 @pytest.fixture()
@@ -306,10 +327,59 @@ def test_run_detail_partial_failure_lists_the_failed_record(
     # 有失败可重试：allowed_actions 与提交路径同源，界面不会出现「按钮可点却被拒」。
     assert data["allowed_actions"]["can_retry_failed"] is True
     assert data["allowed_actions"]["retry_failed_selected"] == 1
-    # `last_error` 在这里是**批次收尾摘要**（为什么不是 completed），不是「批次
-    # 执行不下去」：后者是系统性故障，会带暂停派发标志。
-    assert data["last_error"] == {"code": "PARTIAL_FAILED", "failed_count": 1}
+    # **S06-02 起 `partial_failed` 不写 `last_error`**：收尾摘要由 `failure_summary`
+    # （上面已核对）与 `counts` 承载，`last_error` 只留给真错误——也就是
+    # `_fail_systemically` 那条带暂停派发标志的路径。旧批次里的
+    # `{code: PARTIAL_FAILED, failed_count}` 不迁移，界面两种都要能显示，
+    # 存量形状的那一条由下面 `test_run_detail_still_renders_legacy_last_error` 守住。
+    assert data["last_error"] is None
     assert data["execution_control"]["model_dispatch_paused"] is False
+
+
+def test_run_detail_still_renders_legacy_last_error(
+    client: TestClient, app_config, tmp_path: Path
+) -> None:
+    """存量批次的 `last_error` **原样返回**：新代码不迁移、不改写旧数据。
+
+    库里已经有一批 S04／S05 期间落下的 `{code: PARTIAL_FAILED, failed_count}`，
+    界面必须照样能显示；这里直接把那个形状写回库，验证读口不做加工。
+    """
+    validation_id = upload_sample(client, tmp_path, "mixed-outcome")
+    run_id = create_run(client, validation_id, new_key()).json()["data"]["run_id"]
+    run_worker_once(app_config)
+    legacy = {"code": "PARTIAL_FAILED", "failed_count": 1}
+    connection = Database(app_config.paths.database).connect()
+    try:
+        connection.execute(
+            "UPDATE runs SET last_error_json = ? WHERE run_id = ?",
+            (json.dumps(legacy, ensure_ascii=False), run_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    fresh = TestClient(create_app(make_config(tmp_path)))
+    data = fresh.get(f"/api/runs/{run_id}").json()["data"]
+
+    assert data["status"] == "partial_failed"
+    assert data["last_error"] == legacy  # 逐字返回，不做任何「升级」
+    assert data["failure_summary"]["count"] == 1  # 新老两种口径同时可见
+
+
+def test_systemic_failure_still_writes_last_error(
+    client: TestClient, app_config, tmp_path: Path
+) -> None:
+    """语义分工的另一半：真错误（系统性故障）**继续**写 `last_error`。"""
+    validation_id = upload_sample(client, tmp_path, "no-refs")
+    run_id = create_run(client, validation_id, new_key()).json()["data"]["run_id"]
+    run_worker_once(app_config, client_factory=invalid_config_factory)
+
+    data = client.get(f"/api/runs/{run_id}").json()["data"]
+
+    assert data["status"] == "failed"
+    assert data["last_error"] is not None
+    assert data["last_error"]["code"] == "CONFIG_INVALID"
+    assert data["execution_control"]["model_dispatch_paused"] is True
 
 
 def test_run_detail_exposes_worker_registration_without_judging_liveness(

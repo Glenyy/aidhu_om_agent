@@ -5,16 +5,28 @@
 那属于人（或后续分析）的工作。
 
 本模块不参与判定：判定仍只看 `agent/validation.py` 的逐字子串规则。
+
+S06-02 起，原本挂在临时接口内存注册表上的**诊断产物写入**（`_write_diagnostic`）
+也搬到这里，由 worker 的记录失败路径调用（S06 阶段文档 §0.2 第 6 项）。
 """
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Mapping
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any
 
-from ..schemas.qa import normalize_text
+from ..schemas.analysis import STAGE1_SCHEMA_VERSION
+from ..schemas.judgement import STAGE2_SCHEMA_VERSION
+from ..schemas.qa import QARecord, normalize_text
+from .stage1 import STAGE1_PROMPT_VERSION
+from .stage2 import STAGE2_PROMPT_VERSION
 from .validation import ValidationError, extract_json_object
+
+logger = logging.getLogger(__name__)
 
 #: 相似度计算的最长参与长度；超长时只取前若干字符，避免诊断本身变慢。
 _SIMILARITY_LIMIT = 4000
@@ -164,4 +176,117 @@ def diagnose_raw_output(text: str, refs: Mapping[str, str | None]) -> dict[str, 
     }
 
 
-__all__ = ["diagnose_evidences", "diagnose_quote", "diagnose_raw_output"]
+def needs_diagnostic(payload: Mapping[str, Any]) -> bool:
+    """这次记录执行是否值得写诊断产物。
+
+    判定口径与 S03 完全相同：**干净成功不写**（状态 ``completed`` 且每次尝试都是
+    ``ok``），其余都写——包括「某次尝试被拒、重试后成功」这种状态为 ``completed``
+    但仍有原文可判读的记录。
+    """
+    attempts = payload.get("attempts") or ()
+    if payload.get("status") == "completed" and not any(
+        attempt.get("outcome") != "ok" for attempt in attempts
+    ):
+        return False
+    return True
+
+
+def write_record_diagnostic(
+    *,
+    runtime_root: str | Path,
+    job_id: str,
+    run_id: str,
+    record_key: str,
+    record: QARecord,
+    payload: Mapping[str, Any],
+    mode: str,
+    written_at: str,
+) -> Path | None:
+    """把一次值得判读的记录执行写到 ``<runtime>/judge-diagnostics/``。
+
+    ``payload`` 用 `agent.pipeline.result_to_payload()` 的形状（与记录详情接口同源），
+    所以落盘的内容与界面上看到的是同一份事实。文件名
+    ``judge-<job_id>-<record_key>.json``：一个批次任务可能有多条失败记录，
+    只写 ``job_id`` 会互相覆盖。
+
+    返回文件路径；不需要写（干净成功）或写失败时返回 ``None``。**整段包 try/except**：
+    诊断是观测手段，写盘失败绝不能改变任务状态，也不能把已完成的记录标成失败。
+    """
+    try:
+        if not needs_diagnostic(payload):
+            return None
+
+        attempts = payload.get("attempts") or ()
+        refs = record.refs or {}
+        diagnosed = []
+        for attempt in attempts:
+            raw_output = attempt.get("raw_output")
+            diagnosed.append(
+                {
+                    "stage": attempt.get("stage"),
+                    "attempt": attempt.get("attempt"),
+                    "outcome": attempt.get("outcome"),
+                    "latency_ms": attempt.get("latency_ms"),
+                    "error_code": attempt.get("error_code"),
+                    "error_message": attempt.get("error_message"),
+                    "raw_output_truncated": attempt.get("raw_output_truncated"),
+                    "raw_output": raw_output,
+                    "quote_diagnosis": (
+                        diagnose_raw_output(raw_output, refs) if raw_output else None
+                    ),
+                }
+            )
+
+        document = {
+            "job_id": job_id,
+            "run_id": run_id,
+            "record_key": record_key,
+            "record_id": payload.get("record_id"),
+            "source_row": payload.get("source_row"),
+            # worker 的**实际**模式（mock/real），不是 `jobs.mode`（那个是
+            # initial/resume/retry_failed，见记录详情接口的同一提醒）。
+            "mode": mode,
+            # 只写**记录**状态：任务状态要到 `_finalize` 才定，这里写出来就是假事实。
+            "record_status": payload.get("status"),
+            "written_at": written_at,
+            "models": sorted(
+                {
+                    attempt.get("model")
+                    for attempt in attempts
+                    if attempt.get("model")
+                }
+            ),
+            "prompt_versions": {
+                "stage1": STAGE1_PROMPT_VERSION,
+                "stage2": STAGE2_PROMPT_VERSION,
+            },
+            "schema_versions": {
+                "stage1": STAGE1_SCHEMA_VERSION,
+                "stage2": STAGE2_SCHEMA_VERSION,
+            },
+            "failure": payload.get("failure"),
+            "attempts": diagnosed,
+        }
+
+        directory = Path(runtime_root) / "judge-diagnostics"
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"judge-{job_id}-{record_key}.json"
+        target.write_text(
+            json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return target
+    except Exception:  # noqa: BLE001 - 观测失败不得影响判定结果
+        logger.warning(
+            "诊断产物写入失败（不影响任务状态）：job=%s record=%s", job_id, record_key
+        )
+        return None
+
+
+__all__ = [
+    "diagnose_evidences",
+    "diagnose_quote",
+    "diagnose_raw_output",
+    "needs_diagnostic",
+    "write_record_diagnostic",
+]
+

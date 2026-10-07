@@ -1,7 +1,6 @@
 // S03-07：前端使用的接口类型，字段与 plan/08 及后端返回保持一致。
 // 标签、状态与证据一律按后端返回的文本展示，前端不推导业务类别。
 
-export type JudgeMode = 'mock' | 'real';
 export type PrecheckStatus = 'passed' | 'blocked';
 // 任务与批次共用同一套状态（plan/10 §2）；`interrupted` 只在进程被停掉后由新 worker
 // 的启动恢复写入，`/api/judge` 的临时内存任务不会产生它。
@@ -134,32 +133,8 @@ export interface AttemptSummary {
   raw_output_truncated: boolean;
 }
 
-export interface RecordFailure {
-  stage: string;
-  code: string;
-  message: string;
-  attempt_count: number;
-  retryable: boolean;
-}
-
-export interface RecordResultPayload {
-  record_id: string | null;
-  source_row: number;
-  status: 'completed' | 'failed';
-  label: string | null;
-  simulated: boolean;
-  stage1: Stage1Analysis | null;
-  stage2: Stage2Judgement | null;
-  failure: RecordFailure | null;
-  attempts: AttemptSummary[];
-}
-
-/** POST /api/judge 的返回：任务已提交，结果需轮询 JobPayload。 */
-export interface JudgeCreated {
-  job_id: string;
-  mode: JudgeMode;
-  status: JobStatus;
-}
+// S06-05 删除：`RecordResultPayload` 与 `JudgeCreated` 是 `POST /api/judge` 的返回形状。
+// 该接口已删除，单条结果改由记录详情（`RunRecordDetail`）承载。
 
 // ------------------------------------------------- S04-07：批次列表与详情
 
@@ -363,21 +338,103 @@ export interface ResumeResult {
   reused: boolean;
 }
 
-export interface JobPayload {
+// S06-05 删除：`JobPayload` 是已删除的 `POST /api/judge` 的内存任务形状。任务查询
+// 现在只走 `GET /api/jobs/{job_id}` 并返回库里的任务（`JobDetail`）。
+
+/**
+ * `GET /api/jobs/{job_id}`：库里的任务（[plan/08 §7]），形状与批次详情里的
+ * `active_job`／`recent_jobs` 共用（`RunJobSummary` 多两个列表用不到但同一行本就
+ * 取得到的字段：`last_activity_at`／`worker_id` 这里也有）。
+ *
+ * **`mode` 不是模拟／真实**：判别任务是 `initial`／`resume`／`retry_failed`，
+ * 导出任务是 `automatic`／`manual`。判断模拟／真实要看批次详情的
+ * `call_statistics.*.simulated` 与 `execution_control.last_worker.mode`。
+ */
+export interface JobDetail {
   job_id: string;
+  run_id: string;
   kind: string;
-  mode: JudgeMode;
+  mode: string;
   status: JobStatus;
+  current_record_key: string | null;
   current_stage: string | null;
-  /** 本阶段正在进行的第几次尝试；终态为 null。 */
-  current_attempt: number | null;
+  worker_id: string | null;
   created_at: string;
   started_at: string | null;
+  last_activity_at: string | null;
   finished_at: string | null;
-  /** 已用毫秒；运行中由轮询刷新，终态为最终值。可空（尚未开始）。 */
-  elapsed_ms: number | null;
-  validation_id: string;
-  record_key: string;
-  result: RecordResultPayload | null;
   error: { code: string; message: string } | null;
+  result: { counts?: Record<string, number>; attempted?: number } | null;
+}
+
+// ------------------------------------- S06-04：记录列表与单条证据详情（plan/08 §6）
+
+/** `records.status`；与建表 CHECK 同值。 */
+export type RecordStatus =
+  | 'pending'
+  | 'input_invalid'
+  | 'stage1_done'
+  | 'completed'
+  | 'failed';
+
+export interface RecordFailurePayload {
+  stage: string;
+  code: string;
+  message: string;
+  attempt_count: number;
+  retryable: boolean;
+}
+
+/**
+ * 记录列表项。**不含 `a` 与任何 ref**：列表只用来定位与筛选，
+ * 完整输入与证据正文在单条详情里。
+ */
+export interface RunRecordListItem {
+  record_key: string;
+  record_id: string | null;
+  source_row: number;
+  order_index: number;
+  q_preview: string | null;
+  status: RecordStatus;
+  label: string | null;
+  reason: string | null;
+  review_required: boolean | null;
+  failure: RecordFailurePayload | null;
+}
+
+export interface RunRecordListPage {
+  items: RunRecordListItem[];
+  page: number;
+  page_size: number;
+  total: number;
+  /** 生成这一页时批次的 revision；翻页时对不上就说明批次又变了。 */
+  revision: number;
+}
+
+/** 输入失败行的原因；与预检报告 `row_errors[]` 同源。 */
+export interface RecordInputError {
+  source_row: number;
+  record_id: string | null;
+  reason: string;
+}
+
+/** 单条记录的完整证据；`stage1`／`stage2` 是模型返回的原文（含更正）。 */
+export interface RunRecordDetail {
+  run_id: string;
+  record_key: string;
+  record_id: string | null;
+  source_row: number;
+  order_index: number;
+  status: RecordStatus;
+  revision: number;
+  input: Record<string, string | null>;
+  label: string | null;
+  review_required: boolean | null;
+  failure: RecordFailurePayload | null;
+  input_error: RecordInputError | null;
+  stage1: Stage1Analysis | null;
+  stage2: Stage2Judgement | null;
+  attempt_summary: AttemptSummary[];
+  created_at: string;
+  updated_at: string;
 }

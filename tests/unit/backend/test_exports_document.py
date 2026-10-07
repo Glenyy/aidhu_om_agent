@@ -29,6 +29,7 @@ from aidhu_om_agent.schemas.export import (
     EXCEL_DIGEST_NOTE,
     EXPORT_CONTRACT_VERSION,
     FAILURE_COLUMNS,
+    JSONL_RECORD_FIELDS,
     REVIEW_COLUMNS,
     SHEET_CLASSIFICATION,
     SHEET_FAILURES,
@@ -316,6 +317,29 @@ def test_jsonl_has_one_line_per_record_with_ordinals_and_full_refs(mixed_run) ->
     # 正常记录：两阶段各一次。
     assert records[0]["attempt_summary"]["total"] == 2
     assert records[0]["attempt_summary"]["failed"] == 0
+
+
+def test_jsonl_never_carries_rejected_model_output(mixed_run) -> None:
+    """被拒的模型输出**只在记录详情**暴露，导出不承接（S06 阶段文档 §3）。
+
+    这批数据里确实有 3 次被校验拒绝的阶段二尝试（`call_attempts.final_content`
+    非空），所以这里排的是「导出层漏带」，不是「本来就没有」。
+    """
+    _, database, run_id = mixed_run
+    document = build_document(snapshot_of(database, run_id), export_id=EXPORT_ID)
+    records = jsonl_records(document)
+
+    failed = next(item for item in records if item["failure"])
+    assert failed["failure"]["attempt_count"] == 3
+    for item in records:
+        assert list(item) == list(JSONL_RECORD_FIELDS)
+        assert not any("raw_output" in key or "content" in key for key in item)
+    # 拒过的正文还在库里（导出没有它，不等于没有发生）。
+    with read_transaction(database.connect()) as snapshot:
+        stored = snapshot.execute(
+            "SELECT COUNT(*) FROM call_attempts WHERE final_content IS NOT NULL"
+        ).fetchone()[0]
+    assert stored >= failed["failure"]["attempt_count"] > 0
 
 
 def test_jsonl_keeps_null_labels_and_blank_input_for_unfinished_records(

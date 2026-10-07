@@ -1,19 +1,17 @@
-"""S03-07：HTTP 请求模型与统一响应包装（最小集）。
+"""HTTP 请求模型与统一响应包装。
 
 字段命名与错误封套遵循 [plan/08 §1](../../../plan/08-API接口与数据合同.md)：
 ``/api`` 前缀、snake_case、成功 ``data`` + ``request_id``、错误 ``error`` + ``request_id``。
 
-本阶段**不实现**分页、批次列表与详情、导出（S04-07／S06）。
+S06-02 起 `JudgeRequest`／`JudgeMode` 随 `POST /api/judge` 一并删除：判别模式不再由
+请求提交，而是由 worker 的启动参数决定（S06 阶段文档 §0.2 第 1、7 项）。
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel
-
-#: 判别模式：``mock`` 为确定性合成响应（默认），``real`` 为真实模型调用。
-JudgeMode = Literal["mock", "real"]
 
 
 class ValidateRequest(BaseModel):
@@ -44,18 +42,6 @@ class ResumeRequest(BaseModel):
     retry_failed: bool = False
 
 
-class JudgeRequest(BaseModel):
-    """判一条请求。
-
-    ``record_key`` 取 `/api/uploads/{upload_id}/validate` 返回记录列表中的
-    同名键（编号或来源行）。
-    """
-
-    validation_id: str
-    record_key: str
-    mode: JudgeMode = "mock"
-
-
 def ok(data: Any, request_id: str) -> dict[str, Any]:
     """成功响应封套。"""
     return {"data": data, "request_id": request_id}
@@ -70,8 +56,6 @@ def error_body(code: str, message: str, request_id: str, details: Any = None) ->
 
 
 __all__ = [
-    "JudgeMode",
-    "JudgeRequest",
     "ResumeRequest",
     "RunCreateRequest",
     "ValidateRequest",

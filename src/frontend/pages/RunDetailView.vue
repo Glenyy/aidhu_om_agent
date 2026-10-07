@@ -1,5 +1,6 @@
 <!--
-  S04-07：批次详情（最小形态）＋ S05-05：导出区块。
+  S04-07：批次详情（最小形态）＋ S05-05：导出区块 ＋ S06-03：收尾摘要与失败数
+  ＋ S06-04：记录列表（分页 + 筛选 + 进单条详情）＋ S06-05：失败摘要可直达详情。
 
   展示后端返回的状态、计数、进度、当前任务、调用统计、失败摘要与 allowed_actions，
   不推导业务结论。三个必须说清楚的地方：
@@ -25,16 +26,20 @@ import {
   artifactDownloadUrl,
   createExport,
   fetchExports,
+  fetchRecords,
   fetchRun,
   newIdempotencyKey,
   resumeRun,
 } from '../api/client';
+import { RECORD_LABELS, RECORD_PAGE_SIZES, RECORD_STATUSES } from '../constants';
 import type {
   ExportCreated,
   ExportListPage,
   ResumeResult,
   RunDetail,
   RunExport,
+  RunRecordListItem,
+  RunRecordListPage,
 } from '../types/api';
 
 const TERMINAL_STATUS = new Set(['completed', 'partial_failed', 'failed']);
@@ -91,6 +96,200 @@ const totalAttempts = computed(() => {
 });
 
 const exportsList = computed<RunExport[]>(() => exportPage.value?.items ?? []);
+
+/**
+ * 收尾摘要（S06-03）。
+ *
+ * `partial_failed` **不是错误**，它是「已收尾但没有全部成功」。S06-02 起后端不再为它
+ * 写 `last_error`，摘要由 `counts` 与 `failure_summary` 承载；这里把这句话显示出来，
+ * 免得用户看到「部分失败」却找不到失败几条。
+ */
+const settlementNotice = computed<string | null>(() => {
+  const current = detail.value;
+  if (!current || current.status !== 'partial_failed') return null;
+  return `本批次已收尾但没有全部成功：技术失败 ${current.counts.failed} 条、输入失败 ${current.counts.input_invalid} 条。明细见下方「失败记录摘要」。`;
+});
+
+/**
+ * 旧批次里的 `last_error` 是 `{code: PARTIAL_FAILED, failed_count}` 这种**收尾摘要**。
+ * 存量数据不迁移（S06 阶段文档 §0.3 第 8 项），所以这里单独识别它，措辞与真错误分开。
+ */
+const legacySettlementError = computed(
+  () => detail.value?.last_error?.code === 'PARTIAL_FAILED',
+);
+
+// ---------------------------------------- S06-04：记录列表（分页 + 筛选，plan/08 §6）
+
+const recordsPage = ref<RunRecordListPage | null>(null);
+const recordHint = ref<string | null>(null);
+const recordLoading = ref(false);
+/** 生成当前这一页时的批次 revision；下一次批次轮询拿到新 revision 就重取本页。 */
+let recordsRevision: number | null = null;
+
+function queryText(raw: unknown): string | null {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function queryInt(raw: unknown, fallback: number): number {
+  const value = Number(queryText(raw));
+  return Number.isInteger(value) && value >= 1 ? value : fallback;
+}
+
+/** 只接受后端认得的枚举值：非法值当作「没有这个筛选」，不发出去吃 422。 */
+function queryEnum(raw: unknown, allowed: readonly string[]): string | null {
+  const value = queryText(raw);
+  return value !== null && allowed.includes(value) ? value : null;
+}
+
+/** 「是否需复核」的三态：未给＝不筛、`true`／`false` 作为布尔发给后端。 */
+function queryBool(raw: unknown): boolean | null {
+  const value = queryText(raw);
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
+}
+
+function queryRecordPageSize(raw: unknown): number {
+  const value = queryInt(raw, 50);
+  return (RECORD_PAGE_SIZES as readonly number[]).includes(value) ? value : 50;
+}
+
+// 同批次列表页：筛选与页码写在 URL query 里，刷新与分享后仍然生效。
+const recordQuery = computed(() => ({
+  page: queryInt(route.query.rpage, 1),
+  pageSize: queryRecordPageSize(route.query.rsize),
+  label: queryEnum(route.query.rlabel, RECORD_LABELS),
+  reviewRequired: queryBool(route.query.rreview),
+  status: queryEnum(route.query.rstatus, RECORD_STATUSES),
+  recordId: queryText(route.query.rid),
+}));
+
+const records = computed<RunRecordListItem[]>(() => recordsPage.value?.items ?? []);
+const recordFiltering = computed(
+  () =>
+    recordQuery.value.label !== null ||
+    recordQuery.value.reviewRequired !== null ||
+    recordQuery.value.status !== null ||
+    recordQuery.value.recordId !== null,
+);
+
+async function loadRecords(): Promise<void> {
+  recordLoading.value = true;
+  try {
+    recordsPage.value = await fetchRecords(runId.value, recordQuery.value);
+    recordsRevision = recordsPage.value.revision;
+    recordHint.value = null;
+  } catch (error) {
+    recordHint.value =
+      error instanceof ApiError ? `[${error.code}] ${error.message}` : String(error);
+  } finally {
+    recordLoading.value = false;
+  }
+}
+
+function recordQueryString(next: {
+  page: number;
+  pageSize: number;
+  label: string | null;
+  reviewRequired: boolean | null;
+  status: string | null;
+  recordId: string | null;
+}): string {
+  const query: Record<string, string> = {};
+  if (next.page > 1) query.rpage = String(next.page);
+  if (next.pageSize !== 50) query.rsize = String(next.pageSize);
+  if (next.label) query.rlabel = next.label;
+  if (next.reviewRequired !== null) query.rreview = String(next.reviewRequired);
+  if (next.status) query.rstatus = next.status;
+  if (next.recordId) query.rid = next.recordId;
+  return new URLSearchParams(query).toString();
+}
+
+/** 合并进当前 URL query（其它 query 键原样保留），只有变化时才导航。 */
+function applyRecordQuery(patch: Partial<typeof recordQuery.value>): void {
+  const next = { ...recordQuery.value, ...patch };
+  const target = recordQueryString(next);
+  if (target === recordQueryString(recordQuery.value)) return;
+  void router.replace({ query: Object.fromEntries(new URLSearchParams(target)) });
+}
+
+/** 换筛选条件回到第 1 页：停在第 5 页筛出 1 条会让用户以为「没有结果」。 */
+function onRecordFilterChange(patch: Partial<typeof recordQuery.value>): void {
+  applyRecordQuery({ ...patch, page: 1 });
+}
+
+function onRecordPageChange(value: number): void {
+  applyRecordQuery({ page: value });
+}
+
+function onRecordPageSizeChange(value: number): void {
+  applyRecordQuery({ page: 1, pageSize: queryRecordPageSize(value) });
+}
+
+/**
+ * 打开单条记录详情。**带上当前的记录筛选**（`rpage`／`rlabel`／`rstatus`…），
+ * 这样详情页的「返回批次详情」能回到同一个筛选与页码，分享出去的链接也是同一条
+ * （S06 阶段文档 §2.1 第 10 项）。query 键都是记录列表自己的，跨页不会互相干扰。
+ */
+function openRecord(recordKey: string): void {
+  void router.push({ path: `/runs/${runId.value}/records/${recordKey}`, query: route.query });
+}
+
+/** 一键跳到「失败记录」视图：只改记录列表自己的筛选键，其它 query 保留。 */
+function showFailedRecords(): void {
+  applyRecordQuery({ page: 1, status: 'failed' });
+}
+
+/** 同上，筛出输入失败的行（`input_invalid` 与 `failed` 是两种成因，分开筛）。 */
+function showInputInvalidRecords(): void {
+  applyRecordQuery({ page: 1, status: 'input_invalid' });
+}
+
+function onRecordRowClick(row: RunRecordListItem): void {
+  openRecord(row.record_key);
+}
+
+/** 下拉的 change 在清空时可能给 `null` 或空串，统一当成「没有这个筛选」。 */
+function onLabelFilterChange(value: string | null): void {
+  onRecordFilterChange({ label: value ? value : null });
+}
+
+function onStatusFilterChange(value: string | null): void {
+  onRecordFilterChange({ status: value ? value : null });
+}
+
+function onReviewFilterChange(value: string | null): void {
+  onRecordFilterChange({
+    reviewRequired: value === 'true' ? true : value === 'false' ? false : null,
+  });
+}
+
+/** 编号按**精确匹配**筛（plan/08 §6）；空串表示不筛。 */
+function onRecordIdFilterChange(value: string): void {
+  const text = (value ?? '').trim();
+  onRecordFilterChange({ recordId: text ? text : null });
+}
+
+function clearRecordFilters(): void {
+  onRecordFilterChange({
+    page: 1,
+    label: null,
+    status: null,
+    reviewRequired: null,
+    recordId: null,
+  });
+}
+
+function recordStatusTagType(status: string): 'success' | 'warning' | 'danger' | 'info' {
+  if (status === 'completed') return 'success';
+  if (status === 'failed') return 'danger';
+  if (status === 'input_invalid') return 'warning';
+  return 'info';
+}
+
 
 /** 有导出还在排队或正在生成文件——导出的单独轮询只在这种时候开着。 */
 const exportInFlight = computed(() =>
@@ -163,6 +362,11 @@ async function load(): Promise<void> {
   if (!exportInFlight.value) {
     await loadExports();
   }
+  // 记录列表按 `revision` 变化刷新（plan/08 §6 结尾）：翻页期间批次又判了几条时，
+  // 这一页会跟着更新，而不是把不同轮次的记录拼在一张表里。
+  if (detail.value && detail.value.revision !== recordsRevision) {
+    await loadRecords();
+  }
   if (shouldPoll.value) {
     if (pollTimer === null) {
       pollTimer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
@@ -183,10 +387,14 @@ watch(runId, () => {
   lastResume.value = null;
   exportPage.value = null;
   lastExport.value = null;
+  recordsPage.value = null;
+  recordsRevision = null;
   stopPolling();
   stopExportPolling();
   void load();
 });
+// 筛选与页码写在 URL query 里：改变时重新取这一页（浏览器前进/后退也一样）。
+watch(() => route.query, () => void loadRecords());
 
 async function doExport(): Promise<void> {
   if (exportSubmitting.value) return;
@@ -301,10 +509,50 @@ function stageText(stage: string | null): string {
           <el-table-column prop="review_required" label="review_required" />
         </el-table>
 
+        <!--
+          收尾摘要与错误分开显示（S06-03）：
+          ① 新批次：`partial_failed` 没有 `last_error`，摘要由 counts/failure_summary 承载；
+          ② 旧批次：库里可能已有 `{code: PARTIAL_FAILED, failed_count}`，原样显示但标明口径；
+          ③ 真错误（系统性故障）：照旧报错，并带暂停派发标志。
+        -->
         <el-alert
-          v-if="detail.last_error"
+          v-if="settlementNotice && !legacySettlementError"
           class="block"
           type="warning"
+          :closable="false"
+          show-icon
+          title="收尾摘要"
+        >
+          <p class="settlement-text">{{ settlementNotice }}</p>
+          <!-- 摘要里的两个数字各自可一键筛出（§2.1 第 15 项）。 -->
+          <div class="settlement-actions">
+            <el-button v-if="detail.counts.failed" size="small" @click="showFailedRecords">
+              在记录列表里只看技术失败（{{ detail.counts.failed }}）
+            </el-button>
+            <el-button
+              v-if="detail.counts.input_invalid"
+              size="small"
+              @click="showInputInvalidRecords"
+            >
+              只看输入失败（{{ detail.counts.input_invalid }}）
+            </el-button>
+          </div>
+        </el-alert>
+        <el-alert
+          v-if="legacySettlementError"
+          class="block"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="上次结束时的收尾摘要（旧批次记录）"
+          :description="`${detail.last_error?.code ?? ''} ${
+            detail.last_error?.message ?? ''
+          }——这是早期版本为「部分失败」留下的收尾摘要，不是执行错误；失败明细看下方「失败记录摘要」。`"
+        />
+        <el-alert
+          v-else-if="detail.last_error"
+          class="block"
+          type="error"
           :closable="false"
           show-icon
           :title="`上次结束时的错误：${detail.last_error.code ?? ''} ${
@@ -315,6 +563,135 @@ function stageText(stage: string | null): string {
     </el-card>
 
     <template v-if="detail">
+      <!-- 记录列表（S06-04）：分页 + 筛选，条件写在 URL query 里 -->
+      <el-card class="panel">
+        <template #header>
+          <div class="header-row">
+            <span>记录列表</span>
+            <div>
+              <el-tag v-if="recordsPage" type="info" size="small">
+                共 {{ recordsPage.total }} 条，revision {{ recordsPage.revision }}
+              </el-tag>
+              <el-button class="refresh" :loading="recordLoading" @click="loadRecords">
+                刷新记录
+              </el-button>
+            </div>
+          </div>
+        </template>
+
+        <el-alert v-if="recordHint" type="error" :closable="false" show-icon :title="recordHint" />
+
+        <div class="filter-row">
+          <el-select
+            class="filter-select"
+            :model-value="recordQuery.label"
+            clearable
+            placeholder="全部标签"
+            @change="onLabelFilterChange"
+          >
+            <el-option v-for="label in RECORD_LABELS" :key="label" :label="label" :value="label" />
+          </el-select>
+
+          <el-select
+            class="filter-select"
+            :model-value="recordQuery.status"
+            clearable
+            placeholder="全部状态"
+            @change="onStatusFilterChange"
+          >
+            <el-option
+              v-for="status in RECORD_STATUSES"
+              :key="status"
+              :label="status"
+              :value="status"
+            />
+          </el-select>
+
+          <el-select
+            class="filter-select"
+            :model-value="
+              recordQuery.reviewRequired === null ? null : String(recordQuery.reviewRequired)
+            "
+            clearable
+            placeholder="是否需复核"
+            @change="onReviewFilterChange"
+          >
+            <el-option label="需人工复核" value="true" />
+            <el-option label="不需人工复核" value="false" />
+          </el-select>
+
+          <el-input
+            class="filter-input"
+            :model-value="recordQuery.recordId ?? ''"
+            placeholder="编号（精确匹配）"
+            clearable
+            @change="onRecordIdFilterChange"
+          />
+
+          <el-button v-if="recordFiltering" @click="clearRecordFilters">清除筛选</el-button>
+        </div>
+
+        <p class="muted">
+          筛选条件写在地址栏里（<span class="mono">rlabel／rstatus／rreview／rid</span>），
+          刷新或把链接发给别人仍是这组筛选；多个条件同时生效是「且」的关系。
+          列表<strong>不含回答与资料原文</strong>，点「查看详情」看完整输入与两阶段证据。
+          「序号」是人读序号（1..N，按输入顺序），存储层的 <span class="mono">order_index</span>
+          从 0 起，两者差 1；导出里的序号同样从 1 起。
+        </p>
+
+        <el-empty
+          v-if="!records.length && !recordLoading"
+          :description="recordFiltering ? '这条筛选下没有记录：清除筛选可看全部' : '这个批次还没有记录'"
+        />
+
+        <el-table v-else :data="records" border @row-click="onRecordRowClick">
+          <el-table-column label="序号" width="80">
+            <template #default="{ row }">{{ row.order_index + 1 }}</template>
+          </el-table-column>
+          <el-table-column label="编号" width="140">
+            <template #default="{ row }">{{ row.record_id ?? '（无编号）' }}</template>
+          </el-table-column>
+          <el-table-column prop="source_row" label="来源行" width="100" />
+          <el-table-column prop="q_preview" label="问题（摘要）" min-width="260" />
+          <el-table-column label="状态" width="130">
+            <template #default="{ row }">
+              <el-tag :type="recordStatusTagType(row.status)" size="small">{{ row.status }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="标签" width="200">
+            <template #default="{ row }">{{ row.label ?? '—' }}</template>
+          </el-table-column>
+          <el-table-column label="需复核" width="100">
+            <template #default="{ row }">
+              {{ row.review_required === null ? '—' : row.review_required ? '是' : '否' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="失败" min-width="200">
+            <template #default="{ row }">
+              {{ row.failure ? `${row.failure.stage}／${row.failure.code}` : '—' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="120">
+            <template #default="{ row }">
+              <el-link type="primary" @click.stop="openRecord(row.record_key)">查看详情</el-link>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <el-pagination
+          v-if="recordsPage"
+          class="pager"
+          background
+          layout="prev, pager, next, sizes, total"
+          :current-page="recordsPage.page"
+          :page-size="recordsPage.page_size"
+          :page-sizes="[...RECORD_PAGE_SIZES]"
+          :total="recordsPage.total"
+          @current-change="onRecordPageChange"
+          @size-change="onRecordPageSizeChange"
+        />
+      </el-card>
+
       <!-- 当前任务与最近任务 -->
       <el-card class="panel">
         <template #header>当前任务与最近任务</template>
@@ -398,10 +775,17 @@ function stageText(stage: string | null): string {
       <!-- 失败摘要 + allowed_actions -->
       <el-card class="panel">
         <template #header>
-          失败记录摘要
-          <el-tag v-if="detail.failure_summary.count" type="danger" class="header-tag">
-            {{ detail.failure_summary.count }} 条
-          </el-tag>
+          <div class="header-row">
+            <span>
+              失败记录摘要
+              <el-tag v-if="detail.failure_summary.count" type="danger" class="header-tag">
+                {{ detail.failure_summary.count }} 条
+              </el-tag>
+            </span>
+            <el-button v-if="detail.failure_summary.count" @click="showFailedRecords">
+              在记录列表里只看失败项
+            </el-button>
+          </div>
         </template>
         <el-empty
           v-if="!detail.failure_summary.count"
@@ -409,7 +793,9 @@ function stageText(stage: string | null): string {
         />
         <template v-else>
           <el-table :data="detail.failure_summary.items" border>
-            <el-table-column prop="order_index" label="顺序" width="80" />
+            <el-table-column label="序号" width="80">
+              <template #default="{ row }">{{ row.order_index + 1 }}</template>
+            </el-table-column>
             <el-table-column label="编号" width="140">
               <template #default="{ row }">{{ row.record_id ?? '（无编号）' }}</template>
             </el-table-column>
@@ -420,9 +806,15 @@ function stageText(stage: string | null): string {
               <template #default="{ row }">{{ row.retryable ? '是' : '否' }}</template>
             </el-table-column>
             <el-table-column prop="message" label="说明" min-width="260" />
+            <el-table-column label="详情" width="100" fixed="right">
+              <template #default="{ row }">
+                <el-link type="primary" @click.stop="openRecord(row.record_key)">查看详情</el-link>
+              </template>
+            </el-table-column>
           </el-table>
           <p class="muted">
-            这里只列编号、失败阶段、错误码与说明，**不含证据正文**；单条详情属 S06。
+            这里只列编号、失败阶段、错误码与说明，<strong>不含证据正文</strong>；点「查看详情」到记录详情页看
+            完整输入、两阶段结果与<strong>被校验拒绝的原始输出</strong>。
           </p>
         </template>
         <p v-if="detail.failure_summary.truncated" class="muted">
@@ -695,6 +1087,14 @@ function stageText(stage: string | null): string {
 
 .mono {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.settlement-text {
+  margin: 0;
+}
+
+.settlement-actions {
+  margin-top: 0.5rem;
 }
 
 .progress,

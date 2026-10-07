@@ -1,16 +1,17 @@
 """FastAPI 应用与静态页面入口。
 
-已挂载的接口：合成样例下载、上传、预检、判一条、任务查询（S03-07），批次创建
-（S04-02）、恢复（S04-05）、批次列表与详情（S04-07），手动导出与导出历史（S05-04）、
-已登记文件下载（S05-04）。
+已挂载的接口：合成样例下载、上传、预检（S03-07），任务查询（S03-07；S06-02 起读库），
+批次创建（S04-02）、恢复（S04-05）、批次列表与详情（S04-07）、记录列表与详情（S06-01），
+手动导出与导出历史（S05-04）、已登记文件下载（S05-04）。
 
 前端的 history 路由由 `_mount_frontend` 的回落处理，`/api/...` 不走回落。
 
 所有错误响应（含参数校验失败与未捕获异常）统一使用 [plan/08 §1] 的 error 信封，
 不混用 FastAPI 默认的 ``{"detail": ...}``。
 
-持久化（S04-02 起）：上传登记与预检快照写入 SQLite，**进程重启后仍然有效**；
-``/api/judge`` 的判别任务仍是内存态（临时接口，S06 由批次记录体系取代）。
+持久化（S04-02 起）：上传登记、预检快照、批次、记录与任务全部写入 SQLite，
+**进程重启后仍然有效**。S06-02 起 ``POST /api/judge``（内存态判一条）已删除，
+界面应用不再持有任何进程内任务状态。
 """
 
 from __future__ import annotations
@@ -22,14 +23,22 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..config import AppConfig, load_config
-from ..services.judging import JudgeJobRegistry
 from ..services.uploads import UploadStore
 from ..storage import Database
 from ..version import package_version
 from .responses import fail
 from .routes import artifacts, jobs, runs, samples, uploads
+
+#: 框架级 HTTP 错误 → 本项目错误码（[plan/08 §1]）。未列出的状态码用 `HTTP_ERROR`
+#: 兜底，仍然给出信封，不让 ``{"detail": ...}`` 漏出去。
+_HTTP_ERROR_CODES: dict[int, str] = {
+    404: "NOT_FOUND",
+    405: "METHOD_NOT_ALLOWED",
+    413: "FILE_TOO_LARGE",
+}
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
@@ -46,12 +55,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app = FastAPI(
         title="AIDHU 回答判别 Agent API",
         version=package_version(),
-        description="上传、预检、判一条（模拟/真实）、批次创建与任务查询。",
+        description="上传、预检、批次创建、批次与记录查询、恢复、导出与任务查询。",
     )
     app.state.config = app_config
     app.state.db = database
     app.state.uploads = UploadStore(database, app_config.paths.uploads)
-    app.state.jobs = JudgeJobRegistry(app_config)
 
     @app.middleware("http")
     async def attach_request_id(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -75,6 +83,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             for problem in exc.errors()
         ]
         return fail(request, 422, "PARAM_VALIDATION", "请求参数不合法", problems)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException):  # type: ignore[no-untyped-def]
+        # 框架自己抛的 404／405 默认是 ``{"detail": ...}``，与本项目信封不一致。
+        # S06-06 的静态服务核对发现的实例：挂了前端回落之后，``POST /api/judge``
+        # 不再是「路径不存在」（回落路由登记了同一路径的 GET）而是 405，调用方按
+        # `error.code` 解析就会拿到 undefined。这里统一成信封；状态码保持框架的判断。
+        code = _HTTP_ERROR_CODES.get(exc.status_code, "HTTP_ERROR")
+        return fail(request, exc.status_code, code, str(exc.detail))
 
     @app.exception_handler(Exception)
     async def unhandled_error(request: Request, exc: Exception):  # type: ignore[no-untyped-def]
@@ -106,13 +123,27 @@ def _mount_frontend(app: FastAPI, dist: Path) -> None:
 
     **``/api/...`` 必须排除在外**：已注册的接口照常匹配，但拼错的接口路径若回落到
     `index.html`，调用方会收到 200 + HTML，把「接口不存在」伪装成成功。
+
+    **回落接受所有方法**（S06-06 核对后收口）：只登记 GET 时，``POST /api/judge``
+    这类「路径只被回落登记过」的请求会被 Starlette 判成 405，同一个已删除的接口
+    在「挂了构建产物」与「没挂」两种部署下分别返回 405 与 404。登记全部方法、
+    并把 ``/api/...`` 放在最前面判掉之后，未注册的接口路径一律 404 信封，不随
+    部署方式变化；非 ``/api`` 的写请求给 405 信封（页面只有 GET/HEAD 有意义），
+    静态文件仍**只对 GET/HEAD** 按文件返回。
     """
     root = dist.resolve()
 
-    @app.get("/{full_path:path}", include_in_schema=False)
+    @app.api_route(
+        "/{full_path:path}",
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        include_in_schema=False,
+    )
     async def spa_fallback(request: Request, full_path: str) -> Any:
         if full_path == "api" or full_path.startswith("api/"):
             return fail(request, 404, "NOT_FOUND", "接口不存在")
+        if request.method not in ("GET", "HEAD"):
+            # 页面与静态资源只有读语义；写请求回 405 信封而不是把 index.html 发回去。
+            raise StarletteHTTPException(status_code=405, detail="页面只支持 GET/HEAD 请求")
         if full_path:
             candidate = (root / full_path).resolve()
             # 防目录穿越：只有确实落在构建产物目录里的文件才按文件返回。

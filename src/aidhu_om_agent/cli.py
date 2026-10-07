@@ -511,14 +511,13 @@ def _run(args: argparse.Namespace) -> int:
     store = UploadStore(database, config.paths.uploads)
     try:
         with source.open("rb") as handle:
-            upload = store.save(
-                source.name, handle, max_bytes=config.limits.max_upload_bytes
-            )
+            upload = store.save(source.name, handle, limits=config.limits)
     except UploadTooLargeError as exc:
         print(f"文件超过上限：{exc}", file=sys.stderr)
         return 2
     except InputReadError as exc:
-        print(f"工作簿无法读取：{exc}", file=sys.stderr)
+        # 消息自身已说明是哪一类：工作簿不可读、或规模防护超限（S06-02 起）。
+        print(f"输入读取错误：{exc}", file=sys.stderr)
         return 2
 
     try:

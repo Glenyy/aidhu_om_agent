@@ -6,13 +6,13 @@ import axios from 'axios';
 import type {
   ExportCreated,
   ExportListPage,
-  JobPayload,
-  JudgeCreated,
-  JudgeMode,
+  JobDetail,
   ResumeResult,
   RunCreated,
   RunDetail,
   RunListPage,
+  RunRecordDetail,
+  RunRecordListPage,
   SampleInfo,
   UploadData,
   ValidationData,
@@ -85,23 +85,20 @@ export function validateUpload(
   );
 }
 
-/** 提交单条判别：后端返回 202 与任务号，结果通过 fetchJob 轮询。 */
-export function judgeRecord(
-  validationId: string,
-  recordKey: string,
-  mode: JudgeMode,
-): Promise<JudgeCreated> {
-  return unwrap<JudgeCreated>(
-    http.post<SuccessEnvelope<JudgeCreated>>('/judge', {
-      validation_id: validationId,
-      record_key: recordKey,
-      mode,
-    }),
-  );
-}
-
-export function fetchJob(jobId: string): Promise<JobPayload> {
-  return unwrap<JobPayload>(http.get<SuccessEnvelope<JobPayload>>(`/jobs/${jobId}`));
+/**
+ * 按 `job_id` 查**库里的任务**（S06-02 起；plan/08 §7）。
+ *
+ * 本页当前没有调用点：批次页读 `GET /api/runs/{run_id}` 的 `active_job`／
+ * `recent_jobs`，导出页读导出历史，都不需要单独查一条任务。这里保留类型化绑定，
+ * 是因为后端接口存在且被测试覆盖（`tests/integration/test_api_s06_jobs.py`），
+ * 删掉它只会让下次要用的人再写一遍封套解包。
+ *
+ * **`mode` 不是模拟／真实**——判别任务是 `initial`／`resume`／`retry_failed`、
+ * 导出任务是 `automatic`／`manual`；模拟／真实只看批次详情的
+ * `call_statistics.*.simulated` 与 `execution_control.last_worker.mode`。
+ */
+export function fetchJob(jobId: string): Promise<JobDetail> {
+  return unwrap<JobDetail>(http.get<SuccessEnvelope<JobDetail>>(`/jobs/${jobId}`));
 }
 
 /** 合成样例清单：界面用它提供「下载示例文件」。 */
@@ -143,11 +140,20 @@ export function createRun(validationId: string, idempotencyKey: string): Promise
   );
 }
 
-/** 批次列表；无筛选条件时默认第 1 页、每页 50 条。 */
-export function fetchRuns(page = 1, pageSize = 50): Promise<RunListPage> {
+/**
+ * 批次列表；无筛选条件时默认第 1 页、每页 50 条。
+ *
+ * `status` 只在有筛选时发送：后端对未知状态返回 422，界面因此把 URL 里的非法值
+ * 归一化掉再请求（见 `RunsView` 的 `queryStatus`）。
+ */
+export function fetchRuns(
+  page = 1,
+  pageSize = 50,
+  status: string | null = null,
+): Promise<RunListPage> {
   return unwrap<RunListPage>(
     http.get<SuccessEnvelope<RunListPage>>('/runs', {
-      params: { page, page_size: pageSize },
+      params: { page, page_size: pageSize, status: status ?? undefined },
     }),
   );
 }
@@ -205,4 +211,50 @@ export function fetchExports(runId: string, page = 1, pageSize = 50): Promise<Ex
  */
 export function artifactDownloadUrl(artifactId: string): string {
   return `/api/artifacts/${encodeURIComponent(artifactId)}/download`;
+}
+
+// ------------------------------------------- S06-04：记录列表与单条证据详情
+
+export interface RecordListQuery {
+  page?: number;
+  pageSize?: number;
+  label?: string | null;
+  reviewRequired?: boolean | null;
+  status?: string | null;
+  recordId?: string | null;
+}
+
+/**
+ * 记录列表：固定按 `order_index` 升序。筛选值只在给出时发送——后端对非法枚举
+ * 返回 422，界面因此把 URL 里的非法值归一化掉再请求（见 `RunDetailView`）。
+ */
+export function fetchRecords(
+  runId: string,
+  query: RecordListQuery = {},
+): Promise<RunRecordListPage> {
+  const params: Record<string, string | number | boolean> = {
+    page: query.page ?? 1,
+    page_size: query.pageSize ?? 50,
+  };
+  if (query.label) params.label = query.label;
+  if (query.status) params.status = query.status;
+  if (query.recordId) params.record_id = query.recordId;
+  if (query.reviewRequired !== null && query.reviewRequired !== undefined) {
+    params.review_required = query.reviewRequired;
+  }
+  return unwrap<RunRecordListPage>(
+    http.get<SuccessEnvelope<RunRecordListPage>>(`/runs/${runId}/records`, { params }),
+  );
+}
+
+/**
+ * 单条记录详情：完整输入、两个阶段的结果、失败与**被拒原文**。
+ * `recordKey` 是内部 UUID，不是预检返回的可读键。
+ */
+export function fetchRecord(runId: string, recordKey: string): Promise<RunRecordDetail> {
+  return unwrap<RunRecordDetail>(
+    http.get<SuccessEnvelope<RunRecordDetail>>(
+      `/runs/${runId}/records/${encodeURIComponent(recordKey)}`,
+    ),
+  );
 }

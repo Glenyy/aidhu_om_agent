@@ -8,11 +8,16 @@
 
 字段对齐 [plan/08 §3](../../../../plan/08-API接口与数据合同.md)。本接口**不要求**
 `Idempotency-Key`：上传与预检不产生模型调用（plan/08 §4）；批次创建（`/api/runs`）
-才要求。分页属 S06。
+才要求。
 
-**临时字段说明**：这里的 ``record_key`` 仍取「编号或来源行」——它是 S03 判一条
-临时接口的选择键，**不是** `records` 表里程序生成的 UUID 主键（S06 用批次记录
-接口取代 `/api/judge` 后消失）。
+**规模防护（S06-02）**：上传时就查**解压总量**与**可见工作表数**，预检时再查
+**选中表的单元格数**；三项都报 422 `BAD_WORKBOOK` 并给出实际值与上限，不裁剪资料。
+`413 FILE_TOO_LARGE` 仍只用于压缩包字节数超限，两者不混用。
+
+**``records[].record_key`` 的语义（S06-02 起）**：它取「编号或来源行」，是**给人看的
+可读键**，用于界面上的有效记录预览；**不是** `records` 表里程序生成的 UUID
+（`record_key` 那个名字被批次记录接口占用了），也**不再作为判别选择键**——S03 的
+`POST /api/judge` 已删除，判一条由整批 + 批次记录详情取代（S06 阶段文档 §0.2 第 1 项）。
 """
 
 from __future__ import annotations
@@ -87,15 +92,12 @@ async def create_upload(request: Request, file: UploadFile = File(...)) -> Any:
         return fail(request, 422, "BAD_WORKBOOK", "只接受 .xlsx 文件")
 
     try:
-        record = store.save(
-            original_filename,
-            file.file,
-            max_bytes=config.limits.max_upload_bytes,
-        )
+        record = store.save(original_filename, file.file, limits=config.limits)
     except UploadTooLargeError as exc:
         return fail(request, 413, "FILE_TOO_LARGE", str(exc))
     except InputReadError as exc:
-        # 工作簿读不出工作表清单：文件已删除且未登记，不留下半份上传。
+        # 工作簿读不出工作表清单或规模防护命中（WorkbookTooLargeError 也是它的子类）：
+        # 文件已删除且未登记，不留下半份上传。
         return fail(request, 422, "BAD_WORKBOOK", str(exc))
     finally:
         await file.close()

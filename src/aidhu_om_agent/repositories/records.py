@@ -15,7 +15,7 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from ..schemas.qa import (
     A_COLUMN,
@@ -201,6 +201,54 @@ def get_record(connection: sqlite3.Connection, record_key: str) -> RecordRow | N
         "SELECT * FROM records WHERE record_key = ?", (record_key,)
     ).fetchone()
     return None if row is None else _row_to_record(row)
+
+
+def list_records_page(
+    connection: sqlite3.Connection,
+    run_id: str,
+    *,
+    limit: int,
+    offset: int,
+    label: str | None = None,
+    review_required: bool | None = None,
+    status: str | None = None,
+    record_id: str | None = None,
+) -> tuple[tuple[RecordRow, ...], int]:
+    """分页 + 筛选的记录列表与**筛选后的**总数（[plan/08 §6]）。
+
+    排序固定 ``order_index`` 升序——它就是输入顺序，翻页与导出的人读序号 1..N 都
+    建立在同一个序列上。多项筛选是 **AND**：``label`` 与 ``review_required`` 只有
+    `completed` 记录才可能命中（建表 CHECK 保证非完成行两列都是 NULL），所以它们
+    天然把未分类行排除在外；想连未分类一起看就不要传这两个参数。
+
+    ``record_id`` 是**精确匹配**（[plan/08 §6]），不是模糊搜索：编号是业务键，含糊
+    匹配会把「找不到」变成「找到一堆看起来像的」。枚举与分页值的合法性由
+    `services/batches.py` 校验，非法值在到达这里之前已被拒。
+    """
+    clauses = ["run_id = ?"]
+    params: list[Any] = [run_id]
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if label is not None:
+        clauses.append("final_label = ?")
+        params.append(label)
+    if review_required is not None:
+        clauses.append("review_required = ?")
+        params.append(1 if review_required else 0)
+    if record_id is not None:
+        clauses.append("record_id = ?")
+        params.append(record_id)
+
+    where = " WHERE " + " AND ".join(clauses)
+    total = connection.execute(
+        f"SELECT COUNT(*) AS n FROM records{where}", tuple(params)
+    ).fetchone()
+    rows = connection.execute(
+        f"SELECT * FROM records{where} ORDER BY order_index LIMIT ? OFFSET ?",
+        (*params, int(limit), int(offset)),
+    ).fetchall()
+    return tuple(_row_to_record(row) for row in rows), int(total["n"])
 
 
 def count_by_status(connection: sqlite3.Connection, run_id: str) -> dict[str, int]:
@@ -666,6 +714,39 @@ def get_stage_result(
         result_sha256=row["result_sha256"],
         validated_at=row["validated_at"],
     )
+
+
+def list_stage_results(
+    connection: sqlite3.Connection, record_keys: Sequence[str], stage: int
+) -> dict[str, StageResultRow]:
+    """一次取回多条记录某阶段的结果（键为 ``record_key``）。
+
+    列表页要用阶段二的 ``reason`` 填摘要，逐行调用 `get_stage_result` 会变成
+    每页 N 次查询；这里用一条 ``IN`` 查询换掉。``record_keys`` 为空时直接返回，
+    不发出 ``IN ()`` 这种语法不合法的 SQL。
+    """
+    keys = tuple(dict.fromkeys(record_keys))
+    if not keys:
+        return {}
+    placeholders = ", ".join("?" for _ in keys)
+    rows = connection.execute(
+        f"SELECT * FROM stage_results WHERE stage = ? AND record_key IN ({placeholders})",
+        (int(stage), *keys),
+    ).fetchall()
+    return {
+        row["record_key"]: StageResultRow(
+            stage_result_id=row["stage_result_id"],
+            record_key=row["record_key"],
+            stage=int(row["stage"]),
+            attempt_id=row["attempt_id"],
+            result_json=row["result_json"],
+            schema_version=row["schema_version"],
+            prompt_sha256=row["prompt_sha256"],
+            result_sha256=row["result_sha256"],
+            validated_at=row["validated_at"],
+        )
+        for row in rows
+    }
 
 
 # ------------------------------------------------------- 记录状态与投影更新

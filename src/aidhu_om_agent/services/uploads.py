@@ -5,7 +5,8 @@ S03-07 的内存实现在本阶段换成 SQLite：`uploads`／`input_validations
 （[plan/08 §3](../../../plan/08-API接口与数据合同.md)）。
 
 原始文件只读保存：服务端生成文件名，原文件名仅作元信息；**不修改原文件内容**。
-文件**先完整写入再登记**；登记失败时删除刚写入的文件，不留孤儿。
+文件**先完整写入再登记**；写入、读取工作表清单或登记任一步失败都删除刚写入的文件，
+不留孤儿。
 
 预检快照保存的是**报告**（`PrecheckReport`），不重复保存记录行：记录属于批次
 （plan/09 §3）。需要完整 `ParsedInput` 时由 `services.batches.load_parsed_input()`
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
+from ..config import LimitsConfig
 from ..excel.reader import file_digest, sheet_catalog
 from ..repositories import runs as runs_repo
 from ..schemas.qa import ParsedInput, PrecheckReport
@@ -67,16 +69,21 @@ class UploadStore:
     # ------------------------------------------------------------------ 上传
 
     def save(
-        self, original_filename: str, stream: BinaryIO, *, max_bytes: int
+        self, original_filename: str, stream: BinaryIO, *, limits: LimitsConfig
     ) -> UploadedFile:
-        """把上传流写入磁盘并登记；超过 ``max_bytes`` 抛 `UploadTooLargeError`。
+        """把上传流写入磁盘并登记；超过体积上限抛 `UploadTooLargeError`。
 
         服务端生成存储名，不使用客户端提供的路径。
+
+        S06-02 起取整个 ``limits`` 而不是单个 ``max_bytes``：工作表清单读取里带着
+        **解压总量**与**可见工作表数**两项防护，它们都要跟着同一份配置走（解压上限
+        是 ``max_upload_bytes`` 的固定倍数，见 `excel.reader.MAX_EXPANDED_RATIO`）。
         """
         self._dir.mkdir(parents=True, exist_ok=True)
         upload_id = uuid.uuid4().hex
         suffix = Path(original_filename).suffix.lower() or ".xlsx"
         target = self._dir / f"{upload_id}{suffix}"
+        max_bytes = limits.max_upload_bytes
 
         size_bytes = 0
         try:
@@ -91,12 +98,15 @@ class UploadStore:
                             f"文件超过上限 {max_bytes} 字节；不截取内容"
                         )
                     handle.write(chunk)
+
+            digest = file_digest(target)
+            sheets = tuple(sheet_catalog(target, limits=limits))
         except BaseException:
+            # 写入超限、不是 xlsx、规模防护命中——三种情况都还没登记，文件留着只会
+            # 占着上传目录（S06-02 补：工作表清单这一步原先在 try 之外，读不出清单
+            # 时会留下孤儿文件）。
             target.unlink(missing_ok=True)
             raise
-
-        digest = file_digest(target)
-        sheets = tuple(sheet_catalog(target))
 
         record = UploadedFile(
             upload_id=upload_id,

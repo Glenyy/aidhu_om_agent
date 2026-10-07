@@ -1,8 +1,9 @@
-"""S02-01—S02-03、S02-05 的输入解析与预检单测。
+"""S02-01—S02-03、S02-05 的输入解析与预检单测（S06-02 补规模防护）。
 
 覆盖：选表顺序、缺列/重名列/重复编号/超限/无有效记录阻断、部分失败与
 统计恒等式、编号归一化、换行统一、ref 全空合法、错误值与公式无缓存值、
-额外列忽略、来源行与顺序保留、原文件不被改写。
+额外列忽略、来源行与顺序保留、原文件不被改写；
+S06-02 的解压总量／单元格数／可见工作表数三层防护。
 """
 
 from __future__ import annotations
@@ -20,12 +21,19 @@ from aidhu_om_agent.excel.reader import (
     BLOCKER_NO_VALID_RECORDS,
     BLOCKER_SHEET_AMBIGUOUS,
     BLOCKER_TOO_MANY_RECORDS,
+    MAX_EXPANDED_RATIO,
+    MAX_SHEET_CELLS,
+    MAX_VISIBLE_SHEETS,
+    PREFERRED_SHEET,
     WARNING_EXTRA_COLUMNS,
     WARNING_NUMERIC_RECORD_ID,
     InputReadError,
+    WorkbookTooLargeError,
+    expanded_size_bytes,
     file_digest,
     precheck,
     select_sheet,
+    sheet_catalog,
 )
 from aidhu_om_agent.schemas.qa import INPUT_COLUMNS, REF_FIELDS
 
@@ -37,6 +45,9 @@ from fixtures.excel_samples import (
     error_value_workbook,
     extra_column_workbook,
     formula_without_cache_workbook,
+    heavy_text_workbook,
+    many_cells_workbook,
+    many_sheets_workbook,
     missing_column_workbook,
     multi_sheet_workbook,
     normal_workbook,
@@ -261,6 +272,90 @@ def test_no_valid_records_blocks(tmp_path: Path) -> None:
     assert blocker_codes(parsed) == {BLOCKER_NO_VALID_RECORDS}
     assert parsed.report.counts.valid == 0
     assert parsed.report.counts.total == 1
+
+
+# ------------------------------------------------- S06-02 规模防护（三层各一）
+
+
+def test_expanded_size_guard_blocks_and_reports_both_numbers(tmp_path: Path) -> None:
+    """压缩后合规、解压后超限：**不是**预检结论，是抛错（接口映射 422）。"""
+    path = heavy_text_workbook(tmp_path / "heavy.xlsx")
+    limits = LimitsConfig(max_upload_bytes=65536, max_records=1000)
+    expanded = expanded_size_bytes(path)
+
+    assert path.stat().st_size < limits.max_upload_bytes  # 没有触发文件大小上限
+    assert expanded > MAX_EXPANDED_RATIO * limits.max_upload_bytes
+
+    with pytest.raises(WorkbookTooLargeError) as error:
+        precheck(path, limits=limits)
+
+    message = str(error.value)
+    assert str(expanded) in message
+    assert str(MAX_EXPANDED_RATIO * limits.max_upload_bytes) in message
+
+
+def test_expanded_size_guard_passes_on_ordinary_long_text(tmp_path: Path) -> None:
+    """长文本本身不触发防护：同样的文件放进宽松上限就是一条正常预检。"""
+    parsed = precheck(heavy_text_workbook(tmp_path / "heavy.xlsx"), limits=GENEROUS)
+
+    assert parsed.report.status == "passed"
+    assert parsed.report.counts.valid == 100
+
+
+def test_sheet_cell_guard_blocks_sparse_giant_sheet(tmp_path: Path) -> None:
+    """只有几 KB、但**声明** 60 万个单元格的表：先于物化行被挡住。"""
+    path = many_cells_workbook(tmp_path / "cells.xlsx", row=1000, column=600)
+
+    with pytest.raises(WorkbookTooLargeError) as error:
+        precheck(path, limits=GENEROUS)
+
+    message = str(error.value)
+    assert str(1000 * 600) in message and str(MAX_SHEET_CELLS) in message
+    assert path.stat().st_size < 100_000  # 文件本身很小，靠的是声明的维度
+
+
+def test_visible_sheet_guard_blocks_too_many_sheets(tmp_path: Path) -> None:
+    path = many_sheets_workbook(tmp_path / "sheets.xlsx", sheets=MAX_VISIBLE_SHEETS + 1)
+
+    with pytest.raises(WorkbookTooLargeError) as error:
+        precheck(path, limits=GENEROUS)
+
+    message = str(error.value)
+    assert str(MAX_VISIBLE_SHEETS + 1) in message and str(MAX_VISIBLE_SHEETS) in message
+
+
+def test_size_guards_are_input_read_errors(tmp_path: Path) -> None:
+    """接口层靠这一层继承关系把三种超限统一映射为 422 `BAD_WORKBOOK`。"""
+    assert issubclass(WorkbookTooLargeError, InputReadError)
+
+
+def test_sheet_catalog_applies_the_upload_time_guards(tmp_path: Path) -> None:
+    """上传即生效：清单接口（上传接口用的就是它）挡住解压总量与表数两级超限。"""
+    limits = LimitsConfig(max_upload_bytes=65536, max_records=1000)
+
+    with pytest.raises(WorkbookTooLargeError):
+        sheet_catalog(heavy_text_workbook(tmp_path / "heavy.xlsx"), limits=limits)
+
+    with pytest.raises(WorkbookTooLargeError):
+        sheet_catalog(many_sheets_workbook(tmp_path / "sheets.xlsx"), limits=GENEROUS)
+
+    # 同一条路径上的正常文件照常通过：防护没有误伤。
+    assert sheet_catalog(normal_workbook(tmp_path / "ok.xlsx"), limits=GENEROUS) == (
+        (PREFERRED_SHEET, True),
+    )
+
+
+def test_cell_guard_belongs_to_the_selected_sheet_only(tmp_path: Path) -> None:
+    """单元格数**只在选定表之后**查，因此不在上传时的清单接口里。
+
+    上传时还没有「选中的表」，所以这一级落在预检；界面上就是在预检那一步
+    收到 422——上传本身成功，文件是用户自己的输入，不该被当成孤儿删掉。
+    """
+    path = many_cells_workbook(tmp_path / "cells.xlsx")
+
+    assert sheet_catalog(path, limits=GENEROUS) == ((PREFERRED_SHEET, True),)
+    with pytest.raises(WorkbookTooLargeError):
+        precheck(path, limits=GENEROUS)
 
 
 # ---------------------------------------------------------------- 单元格不可读

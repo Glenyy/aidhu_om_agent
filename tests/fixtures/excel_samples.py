@@ -146,6 +146,55 @@ def oversized_workbook(path: Path, count: int) -> Path:
     return write_workbook(path, [qa_row(str(index)) for index in range(1, count + 1)])
 
 
+# ------------------------------------------------- S06-02 的规模防护（三种各一）
+
+
+def heavy_text_workbook(path: Path, *, rows: int = 100) -> Path:
+    """压缩后十几 KB、**解压后约 3 MB** 的工作簿（解压总量防护用）。
+
+    每行 q 都是接近 Excel 单元格上限的长文本，且逐行不同（各不相同才会被
+    openpyxl 各自写进 sharedStrings，不会被去重成一份）。
+    """
+    return write_workbook(
+        path,
+        [qa_row(str(index), "A" * 32760 + str(index)) for index in range(rows)],
+    )
+
+
+def many_cells_workbook(path: Path, *, row: int = 1000, column: int = 600) -> Path:
+    """声明维度达 ``row × column`` 的工作簿（单元格数防护用）。
+
+    只写了一个远端单元格，文件本身仍只有几 KB——真实数据都在表头附近，
+    但**工作表声明的尺寸**是 60 万个单元格。这正是要挡住的那类文件。
+    """
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = PREFERRED_SHEET
+    sheet.append(list(HEADER))
+    sheet.append(qa_row("1", Q_TEXT, A_TEXT, ["资料一"]))
+    sheet.cell(row=row, column=column).value = "远端标记"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(path)
+    return path
+
+
+def many_sheets_workbook(path: Path, *, sheets: int = 51) -> Path:
+    """``sheets`` 张**可见**工作表（可见工作表数防护用）。"""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = PREFERRED_SHEET
+    sheet.append(list(HEADER))
+    sheet.append(qa_row("1", Q_TEXT, A_TEXT, ["资料一"]))
+    for index in range(1, sheets):
+        extra = workbook.create_sheet(title=f"EXTRA_{index}")
+        extra.append(list(HEADER))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(path)
+    return path
+
+
 # ---------------------------------------------------------------- 单条异常
 
 

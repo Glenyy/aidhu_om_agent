@@ -6,11 +6,16 @@
 
 单元格读取约定见 S02 阶段文档 §0：公式按 ``data_only=True`` 取缓存值，
 无缓存值或结果为 Excel 错误值的单元格记为不可读，不当作资料文本。
+
+S06-02 起加**上传规模防护**（[plan/08 §3]）：解压总量、可见工作表数在打开工作簿
+前后各查一次，选中表的单元格数在物化行之前查。三项都不裁剪资料，超限抛
+`WorkbookTooLargeError`（`InputReadError` 的子类，接口层统一映射为 422 `BAD_WORKBOOK`）。
 """
 
 from __future__ import annotations
 
 import hashlib
+import zipfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,9 +60,30 @@ WARNING_NUMERIC_RECORD_ID = "NUMERIC_RECORD_ID_LEADING_ZEROS"
 #: 必须能从单元格读出文本的列；ref 为空合法，不在此列。
 REQUIRED_TEXT_COLUMNS: tuple[str, ...] = (ID_COLUMN, Q_COLUMN, A_COLUMN)
 
+#: 解压总量上限的倍数：实际上限 = 该倍数 × ``limits.max_upload_bytes``
+#: （S06 阶段文档 §0.3 第 7 项）。跟着配置联动，不写死 400 MiB。
+MAX_EXPANDED_RATIO = 8
+
+#: 单个工作表允许读取的单元格数上限（行 × 列）。
+MAX_SHEET_CELLS = 500_000
+
+#: 允许的**可见**工作表数上限。隐藏表不计入，但它们的内容同样会被读取，
+#: 所以隐藏表不设上限这一条由「解压总量」兜底。
+MAX_VISIBLE_SHEETS = 50
+
 
 class InputReadError(Exception):
     """输入文件不存在或工作簿无法读取；属于调用错误，不是预检结论。"""
+
+
+class WorkbookTooLargeError(InputReadError):
+    """规模防护命中：解压总量、单元格数或可见工作表数超限。
+
+    与「文件损坏」归为同一类**调用错误**（HTTP 422 `BAD_WORKBOOK`），不是预检结论：
+    预检报告描述的是内容是否符合输入合同，而规模超限在打开工作簿之前/读取单元格
+    之前就被拒绝，根本没有产出报告的机会。超限一律**不裁剪资料**——少读一部分再
+    给出结论，等于用不完整输入下判断。
+    """
 
 
 @dataclass(frozen=True)
@@ -125,27 +151,103 @@ def _name_list(names: Sequence[str]) -> str:
 
 
 # --------------------------------------------------------------------------
+# S06-02：上传规模防护（[plan/08 §3] 的「解压总量、单元格及工作表读取保护」）
+# --------------------------------------------------------------------------
+
+
+def expanded_size_bytes(path: str | Path) -> int:
+    """工作簿解压后的总字节数；**只读 zip 中央目录，不解压任何成员**。
+
+    取的是各成员声明的 ``file_size``。xlsx 是 zip，一个几十 KB 的文件可以声明解压
+    后几十 GB；这一步在 `openpyxl.load_workbook` 之前把这种文件挡掉，代价只有一次
+    目录读取。
+
+    不是 zip（也就是不是 xlsx）时在这里就报「工作簿无法读取」——与 openpyxl 自己的
+    失败落在同一条路径上，调用方不需要多一层分支。
+    """
+    try:
+        with zipfile.ZipFile(Path(path)) as archive:
+            return sum(info.file_size for info in archive.infolist())
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise InputReadError(f"工作簿无法读取：{exc}") from exc
+
+
+def guard_expanded_size(path: str | Path, limits: LimitsConfig) -> int:
+    """解压总量防护；返回实际解压字节数，超限抛 `WorkbookTooLargeError`。"""
+    actual = expanded_size_bytes(path)
+    budget = MAX_EXPANDED_RATIO * limits.max_upload_bytes
+    if actual > budget:
+        raise WorkbookTooLargeError(
+            f"工作簿解压后合计 {actual} 字节，超过上限 {budget} 字节"
+            f"（{MAX_EXPANDED_RATIO} × 上传上限 {limits.max_upload_bytes} 字节）；"
+            "不裁剪资料"
+        )
+    return actual
+
+
+def guard_visible_sheets(sheets: Sequence[tuple[str, bool]]) -> None:
+    """可见工作表数防护；超限抛 `WorkbookTooLargeError`。
+
+    隐藏表不计入：界面上只让用户从可见表里选，隐藏表通常是被刻意留着的旧数据。
+    """
+    visible = sum(1 for _, is_visible in sheets if is_visible)
+    if visible > MAX_VISIBLE_SHEETS:
+        raise WorkbookTooLargeError(
+            f"工作簿有 {visible} 个可见工作表，超过上限 {MAX_VISIBLE_SHEETS} 个；"
+            "不裁剪内容"
+        )
+
+
+def guard_sheet_cells(workbook: object, name: str) -> int:
+    """**选中**工作表的单元格数防护；返回行 × 列，超限抛 `WorkbookTooLargeError`。
+
+    只查被读取的那张表：文件里另有一张用不到的大表，不该阻断当前这次预检。
+    检查发生在 `_sheet_rows` 真的物化全部行**之前**，所以它挡住的正是内存占用。
+    """
+    sheet = workbook[name]  # type: ignore[index]
+    cells = (sheet.max_row or 0) * (sheet.max_column or 0)
+    if cells > MAX_SHEET_CELLS:
+        raise WorkbookTooLargeError(
+            f"工作表 {name!r} 有约 {cells} 个单元格，超过上限 {MAX_SHEET_CELLS} 个；"
+            "不裁剪资料"
+        )
+    return cells
+
+
+# --------------------------------------------------------------------------
 # S03-07：上传接口使用的工作表清单
 # --------------------------------------------------------------------------
 
 
-def sheet_catalog(path: str | Path) -> tuple[tuple[str, bool], ...]:
+def sheet_catalog(
+    path: str | Path, *, limits: LimitsConfig | None = None
+) -> tuple[tuple[str, bool], ...]:
     """列出工作簿中的全部工作表（表名 + 是否可见）。
 
     S03-07 的上传接口需要在尚未预检时展示可选工作表；本函数与 `precheck`
     共用同一份 `_sheet_list`，不重复实现工作簿读取，也不产出预检结论。
+
+    S06-02 起同时承担**上传即生效**的两项规模防护（解压总量、可见工作表数）：
+    上传时就拒绝，比等到预检才拒绝少留一份无用文件。``limits`` 省略时使用内置
+    保护值，与 `precheck` 同一约定；调用方应传 `config.limits`。
     """
+    effective_limits = limits or default_limits()
     source = Path(path)
     if not source.is_file():
         raise InputReadError(f"找不到输入文件：{source}")
+
+    guard_expanded_size(source, effective_limits)
     try:
         workbook = load_workbook(filename=source, read_only=True, data_only=False)
     except Exception as exc:  # openpyxl 对损坏文件抛出多种异常
         raise InputReadError(f"工作簿无法读取：{exc}") from exc
     try:
-        return _sheet_list(workbook)
+        sheets = _sheet_list(workbook)
     finally:
         workbook.close()
+
+    guard_visible_sheets(sheets)
+    return sheets
 
 
 def _at(row: Sequence[object], position: int) -> object:
@@ -182,6 +284,10 @@ def precheck(
 
     ``limits`` 省略时使用内置保护值；调用方（如 CLI）应优先传入配置中的
     ``config.limits``，本函数不自行读取配置文件。
+
+    规模防护分三层：压缩字节数超限是**预检结论**（`blocked` + `FILE_TOO_LARGE`，
+    维持 S02 的既有行为）；解压总量与可见工作表数超限、以及选中表的单元格数超限
+    都是**调用错误**，抛 `WorkbookTooLargeError`（HTTP 422 `BAD_WORKBOOK`）。
     """
     effective_limits = limits or default_limits()
     source = Path(path)
@@ -209,13 +315,17 @@ def precheck(
             ),
         )
 
+    guard_expanded_size(source, effective_limits)
+
     try:
         workbook = load_workbook(filename=source, read_only=True, data_only=False)
     except Exception as exc:  # openpyxl 对损坏文件抛出多种异常
         raise InputReadError(f"工作簿无法读取：{exc}") from exc
 
     try:
-        selection = select_sheet(_sheet_list(workbook), sheet_name)
+        sheets = _sheet_list(workbook)
+        guard_visible_sheets(sheets)
+        selection = select_sheet(sheets, sheet_name)
         if selection.name is None:
             return _blocked(
                 sheet_name=None,
@@ -226,6 +336,7 @@ def precheck(
                     Blocker(code=BLOCKER_SHEET_AMBIGUOUS, message=selection.reason, field="sheet_name"),
                 ),
             )
+        guard_sheet_cells(workbook, selection.name)
         raw_rows = _sheet_rows(workbook, selection.name)
     finally:
         workbook.close()

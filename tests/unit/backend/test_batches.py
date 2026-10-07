@@ -84,7 +84,7 @@ def prepare_validation(
     database.initialize()
     store = UploadStore(database, config.paths.uploads)
     with workbook.open("rb") as handle:
-        upload = store.save(workbook.name, handle, max_bytes=config.limits.max_upload_bytes)
+        upload = store.save(workbook.name, handle, limits=config.limits)
     parsed = precheck(upload.path, None, limits=config.limits)
     validation = store.put_validation(upload.upload_id, parsed)
     return database, validation.validation_id

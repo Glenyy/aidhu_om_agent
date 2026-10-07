@@ -8,6 +8,8 @@
   只**入队**并把目标与重开计划写进任务，实际重开轮次由 worker 认领时落实。
 - ``GET /api/runs``、``GET /api/runs/{run_id}``：批次列表与详情（S04-07，plan/08 §5），
   供界面轮询进度、核对调用统计与允许操作。
+- ``GET /api/runs/{run_id}/records``、``GET /api/runs/{run_id}/records/{record_key}``：
+  记录列表（分页 + 筛选）与单条证据详情（S06-01，plan/08 §6）。
 - ``POST /api/runs/{run_id}/exports``、``GET /api/runs/{run_id}/exports``：手动导出与
   导出历史（S05-04，plan/08 §7）。文件下载在 `artifacts.py`。
 
@@ -25,12 +27,16 @@ from fastapi import APIRouter, Header, Query, Request
 
 from ...config import AppConfig
 from ...services.batches import (
+    RECORD_PAGE_SIZE_DEFAULT,
+    RECORD_PAGE_SIZE_MAX,
     RUN_CREATE_SCOPE,
     RUN_PAGE_SIZE_DEFAULT,
     RUN_PAGE_SIZE_MAX,
     BatchError,
     create_run,
     list_batch_runs,
+    list_run_records,
+    record_detail,
     resume_run,
     run_detail,
 )
@@ -148,6 +154,61 @@ async def get_run_endpoint(request: Request, run_id: str) -> Any:
     database: Database = request.app.state.db
     try:
         payload = run_detail(database, run_id)
+    except BatchError as exc:
+        return fail(request, exc.http_status, exc.code, exc.message, exc.details or None)
+    return success(request, payload)
+
+
+@router.get("/runs/{run_id}/records")
+async def list_run_records_endpoint(
+    request: Request,
+    run_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(
+        default=RECORD_PAGE_SIZE_DEFAULT, ge=1, le=RECORD_PAGE_SIZE_MAX
+    ),
+    label: str | None = Query(default=None),
+    review_required: bool | None = Query(default=None),
+    status: str | None = Query(default=None),
+    record_id: str | None = Query(default=None),
+) -> Any:
+    """记录列表：分页 + 筛选，固定按 `order_index` 升序（[plan/08 §6]）。
+
+    多项筛选是 **AND**；非法枚举与分页值 422。返回筛选后的 `total` 与批次当前
+    `revision`——界面翻页时若 `revision` 变了，就说明这批结果不是同一时刻的。
+
+    摘要**不含 `a` 与任何 ref**：列表是导航用的，资料全文与证据在记录详情里。
+    """
+    database: Database = request.app.state.db
+    try:
+        payload = list_run_records(
+            database,
+            run_id,
+            page=page,
+            page_size=page_size,
+            label=label,
+            review_required=review_required,
+            status=status,
+            record_id=record_id,
+        )
+    except BatchError as exc:
+        return fail(request, exc.http_status, exc.code, exc.message, exc.details or None)
+    return success(request, payload)
+
+
+@router.get("/runs/{run_id}/records/{record_key}")
+async def get_run_record_endpoint(request: Request, run_id: str, record_key: str) -> Any:
+    """单条记录详情：完整输入、两阶段结果、失败信息与调用尝试摘要（[plan/08 §6]）。
+
+    `record_key` 是**内部 UUID**（不是预检返回的可读键），所以记录详情页可以深链接，
+    刷新与转发都不会因为编号缺失或含特殊字符而失效。
+
+    `attempt_summary` 里只有**被校验拒绝**的那几次尝试带 `raw_output`，它是模型输出
+    正文、**不是推理链**；超长时截断并以 `raw_output_truncated` 标记。
+    """
+    database: Database = request.app.state.db
+    try:
+        payload = record_detail(database, run_id, record_key)
     except BatchError as exc:
         return fail(request, exc.http_status, exc.code, exc.message, exc.details or None)
     return success(request, payload)

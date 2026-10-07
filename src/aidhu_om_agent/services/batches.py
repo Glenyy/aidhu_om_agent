@@ -16,16 +16,19 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from ..agent.pipeline import CODE_OUTPUT_INVALID, RAW_OUTPUT_ELLIPSIS
 from ..config import AppConfig
 from ..excel.reader import InputReadError, file_digest, precheck
 from ..repositories import jobs as jobs_repo
 from ..repositories import records as records_repo
 from ..repositories import runs as runs_repo
+from ..schemas.judgement import LABELS
 from ..schemas.qa import INPUT_CONTRACT_VERSION, ParsedInput, PrecheckReport
 from ..storage import (
     Database,
@@ -655,6 +658,23 @@ RUN_STATUSES = frozenset(
 RUN_PAGE_SIZE_DEFAULT = 50
 RUN_PAGE_SIZE_MAX = 100
 
+#: 记录列表分页：默认 50、上限 200（S06 阶段文档 §0.3 第 2 项，用户一并确认）。
+#: 上限比批次列表高：一个批次动辄上千条记录，逐条核对时翻页次数直接决定可用性。
+RECORD_PAGE_SIZE_DEFAULT = 50
+RECORD_PAGE_SIZE_MAX = 200
+
+#: `records.status` 合法值；与建表 CHECK 同值（[plan/09 §3]）。
+RECORD_STATUSES = frozenset(
+    {"pending", "input_invalid", "stage1_done", "completed", "failed"}
+)
+
+#: 合法三分类；与 `schemas/judgement.py` 的唯一定义同源，不在这里另抄一份。
+RECORD_LABELS = LABELS
+
+#: 记录列表里 `q` 的摘要长度。取 200 是「一眼认出是哪条」的长度，不是渲染限制
+#: （列宽由界面决定）；摘要会把连续空白压成单个空格，所以它不保证是 `q` 的逐字切片。
+Q_PREVIEW_LENGTH = 200
+
 #: 详情里最多列出的失败记录条数与最近任务条数；超过部分只报数量，不悄悄截断。
 FAILURE_SUMMARY_LIMIT = 50
 RECENT_JOB_LIMIT = 10
@@ -701,9 +721,15 @@ def _progress_percent(counts: dict[str, int]) -> float:
 
 
 def _job_summary(job: jobs_repo.JobRow) -> dict[str, Any]:
-    """任务摘要；**不含 payload**（里面是整批记录键，界面用不到）。"""
+    """任务摘要；**不含 payload**（里面是整批记录键，界面用不到）。
+
+    `run_id` 在 [plan/08 §7] 的任务字段里，因此**单独查任务**（S06-02 的
+    `job_detail`）时也能看出它属于哪个批次；批次详情里这个字段是冗余的，
+    但两处共用同一个形状，界面与测试不必按入口分辨字段。
+    """
     return {
         "job_id": job.job_id,
+        "run_id": job.run_id,
         "kind": job.kind,
         "mode": job.mode,
         "status": job.status,
@@ -903,11 +929,292 @@ def run_detail(
         connection.close()
 
 
+def job_detail(database: Database, job_id: str) -> dict[str, Any]:
+    """`GET /api/jobs/{job_id}`：**按库**返回任务（S06-02，[plan/08 §7]）。
+
+    S03-07 的实现只查 API 进程的内存注册表，落库的批次任务查不到；``/api/judge``
+    删除后所有任务都在 `jobs` 表里，这里就是唯一读法。字段与批次详情的
+    ``active_job``／``recent_jobs`` **共用 `_job_summary`**，两处不会各自漂移。
+
+    **``mode`` 不是模拟/真实**：判别任务是 `initial`／`resume`／`retry_failed`，
+    导出任务是 `automatic`／`manual`。要判断模拟/真实请看批次详情的
+    `call_statistics.*.simulated` 与 `execution_control.last_worker.mode`。
+    """
+    connection = database.connect()
+    try:
+        with read_transaction(connection) as snapshot:
+            job = jobs_repo.get_job(snapshot, job_id)
+            if job is None:
+                raise BatchError("NOT_FOUND", f"未知 job_id：{job_id}", http_status=404)
+            return _job_summary(job)
+    finally:
+        connection.close()
+
+
+# ------------------------------------------------ 记录查询（S06-01，plan/08 §6）
+
+
+def _q_preview(text: str | None) -> str | None:
+    """列表里的 `q` 摘要；`None` 原样返回（输入失败行没有 q）。"""
+    if text is None:
+        return None
+    flat = " ".join(text.split())
+    if len(flat) <= Q_PREVIEW_LENGTH:
+        return flat
+    return flat[:Q_PREVIEW_LENGTH] + "…"
+
+
+def _stage2_reason(stage2: records_repo.StageResultRow | None) -> str | None:
+    """阶段二的理由原文；没有阶段二结果（未跑完／失败）时为 `None`。"""
+    if stage2 is None:
+        return None
+    payload = json.loads(stage2.result_json)
+    value = payload.get("reason")
+    return None if value is None else str(value)
+
+
+def _attempt_outcome(status: str, code: Any) -> str:
+    """库里的尝试终态 → 界面口径的结果名。
+
+    与 `agent/pipeline.py` 的 `AttemptOutcome` 对齐，另加 `unknown_after_interrupt`：
+    那是「调用已发出但进程在拿到结果前被杀」，不是模型或校验的错误，硬塞进
+    `model_error` 会让人以为服务返回了失败。
+    """
+    if status == records_repo.ATTEMPT_SUCCEEDED:
+        return "ok"
+    if status == records_repo.ATTEMPT_UNKNOWN:
+        return "unknown_after_interrupt"
+    return "validation_error" if code == CODE_OUTPUT_INVALID else "model_error"
+
+
+def _raw_output_of(attempt: records_repo.AttemptRow) -> tuple[str | None, bool]:
+    """被**校验拒绝**的那几次尝试的模型正文；其余返回 ``None``。
+
+    库里每条尝试都存了 `final_content`（成功的那次存的是模型返回的合格正文），
+    但接口只暴露「被拒原文」这一种——成功尝试的正文不是失败证据，且把每次成功调用
+    的正文都发出去等于把整批模型输出复制一份到浏览器。判据与 S03 返工一致：
+    终态是 `failed` 且错误码是 `OUTPUT_INVALID`。
+
+    是否截断靠标记判断（库里没有这一列，见 `RAW_OUTPUT_ELLIPSIS` 的说明）。
+    """
+    if attempt.status != records_repo.ATTEMPT_FAILED:
+        return None, False
+    if (attempt.error or {}).get("code") != CODE_OUTPUT_INVALID:
+        return None, False
+    text = attempt.final_content
+    if not text:
+        return None, False
+    return text, RAW_OUTPUT_ELLIPSIS in text
+
+
+def _attempt_entries(
+    attempts_by_stage: dict[int, tuple[records_repo.AttemptRow, ...]],
+) -> list[dict[str, Any]]:
+    """调用尝试摘要；**形状沿用** `agent/pipeline.py::result_to_payload()`。
+
+    界面在 S03 返工里就是按这个形状渲染「第几次尝试 / 耗时 / 被拒原文」的，批次
+    路径沿用它，同一份界面组件不必为两条路径写两套读取逻辑。
+    """
+    entries: list[dict[str, Any]] = []
+    for stage in sorted(attempts_by_stage):
+        for attempt in attempts_by_stage[stage]:
+            error = attempt.error or {}
+            code = error.get("code")
+            raw_output, truncated = _raw_output_of(attempt)
+            entries.append(
+                {
+                    "stage": records_repo.stage_name(stage),
+                    "attempt": attempt.attempt_no,
+                    "outcome": _attempt_outcome(attempt.status, code),
+                    "model": attempt.returned_model_id,
+                    "latency_ms": attempt.duration_ms,
+                    "simulated": attempt.simulated,
+                    "usage": attempt.usage,
+                    "error_code": code,
+                    "error_message": error.get("message"),
+                    "raw_output": raw_output,
+                    "raw_output_truncated": truncated,
+                }
+            )
+    return entries
+
+
+def _record_summary(
+    row: records_repo.RecordRow,
+    stage2: records_repo.StageResultRow | None,
+) -> dict[str, Any]:
+    """列表摘要；字段与 [plan/08 §6] 逐条对应，**不含 `a` 与任何 ref**。
+
+    ``failure`` 只放技术失败（`failed` 行的 `failure_json`）。输入失败行不在此列：
+    它的 `status` 已经是 `input_invalid`，把两种成因混进同一个字段会让「失败 3 条」
+    这种计数无法解释。原文与输入失败原因在记录详情里各有一个字段。
+    """
+    return {
+        "record_key": row.record_key,
+        "record_id": row.record_id,
+        "source_row": row.source_row,
+        "order_index": row.order_index,
+        "q_preview": _q_preview(row.q),
+        "status": row.status,
+        "label": row.final_label,
+        "reason": _stage2_reason(stage2),
+        "review_required": (
+            None if row.review_required is None else bool(row.review_required)
+        ),
+        "failure": row.failure,
+    }
+
+
+def list_run_records(
+    database: Database,
+    run_id: str,
+    *,
+    page: int = 1,
+    page_size: int = RECORD_PAGE_SIZE_DEFAULT,
+    label: str | None = None,
+    review_required: bool | None = None,
+    status: str | None = None,
+    record_id: str | None = None,
+) -> dict[str, Any]:
+    """`GET /api/runs/{run_id}/records`：分页 + 筛选的记录列表（[plan/08 §6]）。
+
+    除分页四项外**多返回 `revision`**：界面靠它判断「翻页时批次是否又变了」，
+    避免把不同轮次的统计拼成一份最终报告（[plan/08 §6] 结尾）。
+
+    非法枚举与分页值一律 422，不静默忽略筛选条件——把 `label=xxx` 当成「没有筛选」
+    会让用户以为筛出来的就是全部。
+    """
+    if label is not None and label not in RECORD_LABELS:
+        raise BatchError(
+            "PARAM_VALIDATION",
+            f"未知标签 {label!r}；只接受 {'、'.join(RECORD_LABELS)}",
+            http_status=422,
+            details={"allowed": list(RECORD_LABELS)},
+        )
+    if status is not None and status not in RECORD_STATUSES:
+        raise BatchError(
+            "PARAM_VALIDATION",
+            f"未知记录状态 {status!r}；只接受 {'、'.join(sorted(RECORD_STATUSES))}",
+            http_status=422,
+            details={"allowed": sorted(RECORD_STATUSES)},
+        )
+    if page < 1 or page_size < 1:
+        raise BatchError("PARAM_VALIDATION", "page 与 page_size 必须是正整数", http_status=422)
+    if page_size > RECORD_PAGE_SIZE_MAX:
+        raise BatchError(
+            "PARAM_VALIDATION",
+            f"page_size 上限为 {RECORD_PAGE_SIZE_MAX}，收到 {page_size}",
+            http_status=422,
+        )
+
+    connection = database.connect()
+    try:
+        with read_transaction(connection) as snapshot:
+            run = runs_repo.get_run(snapshot, run_id)
+            if run is None:
+                raise BatchError("NOT_FOUND", f"未知 run_id：{run_id}", http_status=404)
+
+            rows, total = records_repo.list_records_page(
+                snapshot,
+                run_id,
+                limit=page_size,
+                offset=(page - 1) * page_size,
+                label=label,
+                review_required=review_required,
+                status=status,
+                record_id=record_id,
+            )
+            stage2_results = records_repo.list_stage_results(
+                snapshot, [row.record_key for row in rows], 2
+            )
+            items = [
+                _record_summary(row, stage2_results.get(row.record_key)) for row in rows
+            ]
+            revision = run.revision
+        return {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "revision": revision,
+        }
+    finally:
+        connection.close()
+
+
+def record_detail(database: Database, run_id: str, record_key: str) -> dict[str, Any]:
+    """`GET /api/runs/{run_id}/records/{record_key}`：单条记录的完整证据（[plan/08 §6]）。
+
+    `record_key` 是**内部 UUID**（`records.record_key`），不是预检返回的可读键：
+    业务编号可能缺失或含不适合放进 URL 的字符（[plan/08 §1]）。
+
+    **不发**模型推理链、请求头与 SDK 调试堆栈。`stage1`／`stage2` 直接回
+    `stage_results.result_json` 解析后的原文——阶段二的 `stage1_corrections` 必须
+    原样保留，重新按模型序列化会把「更正」压平（导出层当初也是这么处理的）。
+
+    `input_error` 是输入失败行的原因（与预检报告 `row_errors[].reason` 同源，本来
+    就经 `/api/uploads/{id}/validate` 公开）。它不进 `failure`：`failure` 是技术失败，
+    两者在导出与计数里一直分开（见 `_failure_rows` 的注释）。
+    """
+    connection = database.connect()
+    try:
+        with read_transaction(connection) as snapshot:
+            run = runs_repo.get_run(snapshot, run_id)
+            if run is None:
+                raise BatchError("NOT_FOUND", f"未知 run_id：{run_id}", http_status=404)
+
+            row = records_repo.get_record(snapshot, record_key)
+            if row is None or row.run_id != run_id:
+                # 记录存在但不属于该批次：对调用方而言就是「这个批次里没有这条」，
+                # 不区分「不存在」与「不在本批次」，避免把别的批次的存在性漏出去。
+                raise BatchError(
+                    "NOT_FOUND",
+                    f"批次 {run_id} 中不存在记录 {record_key}",
+                    http_status=404,
+                )
+
+            stage1 = records_repo.get_stage_result(snapshot, record_key, 1)
+            stage2 = records_repo.get_stage_result(snapshot, record_key, 2)
+            attempts = records_repo.list_attempts_by_stage(snapshot, record_key)
+            # 输入用**建批次时留下的快照**（`raw_input_json`，13 个输入列原文），
+            # 不按当前模型重新拼：输入失败行的 q/a 本来就是空，重拼只会得到同一份。
+            input_snapshot = dict(row.raw_input)
+            revision = run.revision
+        return {
+            "run_id": run_id,
+            "record_key": row.record_key,
+            "record_id": row.record_id,
+            "source_row": row.source_row,
+            "order_index": row.order_index,
+            "status": row.status,
+            "revision": revision,
+            "input": input_snapshot,
+            "label": row.final_label,
+            "review_required": (
+                None if row.review_required is None else bool(row.review_required)
+            ),
+            "failure": row.failure,
+            "input_error": row.input_error,
+            "stage1": None if stage1 is None else json.loads(stage1.result_json),
+            "stage2": None if stage2 is None else json.loads(stage2.result_json),
+            "attempt_summary": _attempt_entries(attempts),
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+    finally:
+        connection.close()
+
+
 __all__ = [
     "FAILURE_SUMMARY_LIMIT",
     "FINALIZE_ONLY_RUN_STATUSES",
     "NEW_BATCH_REQUIRED_CODES",
+    "Q_PREVIEW_LENGTH",
     "RECENT_JOB_LIMIT",
+    "RECORD_LABELS",
+    "RECORD_PAGE_SIZE_DEFAULT",
+    "RECORD_PAGE_SIZE_MAX",
+    "RECORD_STATUSES",
     "RESUMABLE_RUN_STATUSES",
     "RUN_CREATE_SCOPE",
     "RUN_PAGE_SIZE_DEFAULT",
@@ -920,9 +1227,12 @@ __all__ = [
     "allowed_actions",
     "counts_of",
     "create_run",
+    "job_detail",
     "list_batch_runs",
+    "list_run_records",
     "load_parsed_input",
     "plan_resume",
+    "record_detail",
     "resume_run",
     "run_detail",
 ]

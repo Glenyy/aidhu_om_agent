@@ -32,7 +32,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .agent.diagnostics import write_record_diagnostic
 from .agent.mock_samples import MockClient
+from .agent.pipeline import result_to_payload
 from .config import AppConfig
 from .llm.client import ModelClient
 from .repositories import jobs as jobs_repo
@@ -444,6 +446,7 @@ class Worker:
                 sleep=self._sleep,
             )
             attempted += 1
+            self._write_diagnostic(job, record, execution)
 
             # 认证/配置类错误会让后续每条记录重复失败，还可能是真实费用。停下来
             # 报告，不把「同一次故障」重复记到其余记录上（[plan/10 §7]）。
@@ -552,6 +555,25 @@ class Worker:
             connection.close()
         return opened
 
+    def _write_diagnostic(
+        self, job: jobs_repo.JobRow, record: records_repo.RecordRow, execution: Any
+    ) -> None:
+        """把**值得判读**的记录执行落到 `<runtime>/judge-diagnostics/`。
+
+        迁自 S03 的临时接口路径（S06 阶段文档 §0.2 第 6 项），判定口径不变；写盘失败
+        只记日志，**绝不改变任务状态**（`write_record_diagnostic` 内部整段兜住）。
+        """
+        write_record_diagnostic(
+            runtime_root=self._config.paths.runtime,
+            job_id=job.job_id,
+            run_id=job.run_id,
+            record_key=record.record_key,
+            record=record.to_qa_record(),
+            payload=result_to_payload(execution.result),
+            mode=self._mode,
+            written_at=utc_now(),
+        )
+
     def _load_record(self, record_key: str) -> records_repo.RecordRow | None:
         connection = self._database.connect()
         try:
@@ -591,6 +613,12 @@ class Worker:
         错误阻止继续 → `failed`（那条路径在 `_fail_systemically`，不到这里）。
         所以这里**只有前两种结果**：即使全部有效行都技术失败，也如实记
         `partial_failed`，由显式重试处理，不替用户改写成系统性失败。
+
+        **S06-02 起不再写 ``last_error``**（原来的 ``{code: PARTIAL_FAILED,
+        failed_count}`` 是批次收尾摘要，不是「错误」）：收尾摘要由
+        `failure_summary` + `counts` 承载，`last_error` 只留给真错误
+        （`_fail_systemically` 那条路径继续写）。存量批次里已有的 `partial_failed`
+        `last_error` **不迁移、不改写**，界面两种都能显示（S06 阶段文档 §0.3 第 8 项）。
         """
         connection = self._database.connect()
         try:
@@ -618,11 +646,7 @@ class Worker:
                     run_id=run.run_id,
                     status=status,
                     finished_at=now,
-                    last_error=(
-                        {"code": "PARTIAL_FAILED", "failed_count": counts["failed"]}
-                        if counts["failed"]
-                        else None
-                    ),
+                    last_error=None,
                 )
                 jobs_repo.finish_job(
                     tx,
