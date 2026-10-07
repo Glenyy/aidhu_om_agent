@@ -594,6 +594,26 @@ def list_attempts(
     )
 
 
+def list_attempts_by_stage(
+    connection: sqlite3.Connection, record_key: str
+) -> dict[int, tuple[AttemptRow, ...]]:
+    """按阶段分组的全部尝试（含历史轮次）；组内按轮次、尝试序号排序。
+
+    导出要按阶段分列计数（S05-02 的 `attempt_summary`）：`list_attempts` 返回的
+    扁平序列里没有阶段号，硬从排序推阶段是脆的，所以这里让 SQL 把 `c.stage`
+    一起取出来。
+    """
+    grouped: dict[int, list[AttemptRow]] = {}
+    for row in connection.execute(
+        "SELECT a.*, c.stage AS campaign_stage FROM call_attempts a"
+        " JOIN stage_campaigns c ON a.campaign_id = c.campaign_id"
+        " WHERE c.record_key = ? ORDER BY c.stage, c.campaign_no, a.attempt_no",
+        (record_key,),
+    ):
+        grouped.setdefault(int(row["campaign_stage"]), []).append(_row_to_attempt(row))
+    return {stage: tuple(items) for stage, items in sorted(grouped.items())}
+
+
 def insert_stage_result(
     connection: sqlite3.Connection,
     *,
@@ -743,6 +763,7 @@ __all__ = [
     "insert_stage_result",
     "latest_campaign",
     "list_attempts",
+    "list_attempts_by_stage",
     "list_record_failures",
     "list_records",
     "mark_completed",

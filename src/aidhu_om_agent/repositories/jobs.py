@@ -24,6 +24,16 @@ JobStatus = str
 
 ACTIVE_STATUSES: tuple[str, ...] = ("queued", "running")
 
+#: 任务种类；与 `jobs.kind` 的 CHECK 同值。
+CLASSIFY_KIND = "classify"
+EXPORT_KIND = "export"
+JOB_KINDS: tuple[str, ...] = (CLASSIFY_KIND, EXPORT_KIND)
+
+#: 导出任务的来源（**不是** worker 模式）；与 `jobs.mode` 的 CHECK 同值。
+EXPORT_MODE_AUTOMATIC = "automatic"
+EXPORT_MODE_MANUAL = "manual"
+EXPORT_MODES: tuple[str, ...] = (EXPORT_MODE_AUTOMATIC, EXPORT_MODE_MANUAL)
+
 
 def new_job_id() -> str:
     return uuid.uuid4().hex
@@ -98,24 +108,42 @@ def get_job(connection: sqlite3.Connection, job_id: str) -> JobRow | None:
     return None if row is None else _row_to_job(row)
 
 
-def find_active_classification(
-    connection: sqlite3.Connection, run_id: str
+def find_active_job(
+    connection: sqlite3.Connection, run_id: str, *, kind: str
 ) -> JobRow | None:
-    """该批次当前的活跃判别任务；没有则为 ``None``。"""
+    """该批次某个 `kind` 当前的活跃任务（`queued`/`running`）；没有则为 ``None``。
+
+    判别与导出各查各的：一个批次可以同时有一个在跑的判别任务和一个在跑的导出
+    任务，两者不会互相挡住（导出读的是已落库数据，见 S05）。
+    """
     row = connection.execute(
-        "SELECT * FROM jobs WHERE run_id = ? AND kind = 'classify'"
+        "SELECT * FROM jobs WHERE run_id = ? AND kind = ?"
         " AND status IN ('queued', 'running')"
         " ORDER BY created_at, job_id LIMIT 1",
-        (run_id,),
+        (run_id, kind),
     ).fetchone()
     return None if row is None else _row_to_job(row)
 
 
+def find_active_classification(
+    connection: sqlite3.Connection, run_id: str
+) -> JobRow | None:
+    """该批次当前的活跃判别任务；没有则为 ``None``。"""
+    return find_active_job(connection, run_id, kind=CLASSIFY_KIND)
+
+
 def list_jobs_for_run(connection: sqlite3.Connection, run_id: str) -> tuple[JobRow, ...]:
+    """该批次的全部任务，按创建先后（旧→新）。
+
+    同一秒内创建的任务（`created_at` 只到秒）用 `rowid` 兜底，也就是**插入顺序**：
+    批次刚建好就被 worker 认领、几十毫秒内跑完并排上自动导出时，两个任务的
+    `created_at` 会完全相同，这时再按 `job_id`（uuid）排就是随机顺序，界面上的
+    「最近任务」会无缘无故前后颠倒。
+    """
     return tuple(
         _row_to_job(row)
         for row in connection.execute(
-            "SELECT * FROM jobs WHERE run_id = ? ORDER BY created_at, job_id", (run_id,)
+            "SELECT * FROM jobs WHERE run_id = ? ORDER BY created_at, rowid", (run_id,)
         )
     )
 
@@ -141,17 +169,30 @@ TERMINAL_JOB_STATUSES: tuple[str, ...] = (
 
 
 def claim_next_job(
-    connection: sqlite3.Connection, *, worker_id: str, now: str
+    connection: sqlite3.Connection,
+    *,
+    worker_id: str,
+    now: str,
+    kinds: tuple[str, ...] = JOB_KINDS,
 ) -> JobRow | None:
-    """认领最老的 queued 判别任务；没有可认领的任务时返回 ``None``。
+    """认领最老的 queued 任务；没有可认领的任务时返回 ``None``。
 
-    顺序固定为 `created_at, job_id`（[plan/10 §4.4]）。判别任务在执行槽被占用时
+    顺序固定为 `created_at, job_id`（[plan/10 §4.4]）。任务在执行槽被占用时
     **不等待**：唯一索引 `uq_worker_slot` 会拒绝第二次认领，本函数把
     `IntegrityError` 当作「暂时没有可认领的任务」，不修改任何队列状态。
+
+    ``kinds`` 让调用方按闸门收窄可认领的种类：判别暂停时只认领导出任务
+    （[plan/10 §4.7]）。**只有判别任务**会把批次从 `queued` 推到 `running`——
+    导出任务不改变批次的分类状态。
     """
+    kinds = tuple(kinds)
+    if not kinds:
+        return None
+    placeholders = ", ".join("?" for _ in kinds)
     row = connection.execute(
-        "SELECT * FROM jobs WHERE status = 'queued' AND kind = 'classify'"
-        " ORDER BY created_at, job_id LIMIT 1"
+        f"SELECT * FROM jobs WHERE status = 'queued' AND kind IN ({placeholders})"
+        " ORDER BY created_at, job_id LIMIT 1",
+        kinds,
     ).fetchone()
     if row is None:
         return None
@@ -165,11 +206,12 @@ def claim_next_job(
     except sqlite3.IntegrityError:
         return None
 
-    connection.execute(
-        "UPDATE runs SET status = 'running', started_at = COALESCE(started_at, ?)"
-        " WHERE run_id = ? AND status = 'queued'",
-        (now, row["run_id"]),
-    )
+    if row["kind"] == CLASSIFY_KIND:
+        connection.execute(
+            "UPDATE runs SET status = 'running', started_at = COALESCE(started_at, ?)"
+            " WHERE run_id = ? AND status = 'queued'",
+            (now, row["run_id"]),
+        )
     claimed = get_job(connection, row["job_id"])
     return claimed
 
@@ -375,7 +417,13 @@ def set_dispatch_paused(
 
 __all__ = [
     "ACTIVE_STATUSES",
+    "CLASSIFY_KIND",
+    "EXPORT_KIND",
+    "EXPORT_MODE_AUTOMATIC",
+    "EXPORT_MODE_MANUAL",
+    "EXPORT_MODES",
     "IdempotencyRow",
+    "JOB_KINDS",
     "JobRow",
     "JobStatus",
     "JOB_COMPLETED",
@@ -391,6 +439,7 @@ __all__ = [
     "claim_next_job",
     "count_jobs_by_status",
     "find_active_classification",
+    "find_active_job",
     "finish_job",
     "get_idempotent",
     "get_job",

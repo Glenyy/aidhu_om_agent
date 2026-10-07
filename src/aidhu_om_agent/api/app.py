@@ -1,7 +1,8 @@
 """FastAPI 应用与静态页面入口。
 
 已挂载的接口：合成样例下载、上传、预检、判一条、任务查询（S03-07），批次创建
-（S04-02）、恢复（S04-05）、批次列表与详情（S04-07）。导出与下载属 S05／S06。
+（S04-02）、恢复（S04-05）、批次列表与详情（S04-07），手动导出与导出历史（S05-04）、
+已登记文件下载（S05-04）。
 
 前端的 history 路由由 `_mount_frontend` 的回落处理，`/api/...` 不走回落。
 
@@ -28,7 +29,7 @@ from ..services.uploads import UploadStore
 from ..storage import Database
 from ..version import package_version
 from .responses import fail
-from .routes import jobs, runs, samples, uploads
+from .routes import artifacts, jobs, runs, samples, uploads
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
@@ -84,6 +85,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(uploads.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
+    app.include_router(artifacts.router, prefix="/api")
 
     dist = app_config.paths.frontend_dist
     if dist.is_dir():

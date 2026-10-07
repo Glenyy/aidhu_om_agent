@@ -3,6 +3,9 @@
 
   列表只展示后端返回的状态与计数，不推导任何结论；轮询约 2 秒，**全部批次都进入
   终态后停止**。服务重启后刷新本页，批次仍在，因为批次、记录与计数都在 SQLite 里。
+
+  导出不放在列表页：一份导出属于某个批次，界面入口在批次详情页（S05-05）。列表页
+  只把这件事在说明里讲清楚，不放按钮——列表上的按钮会让人以为「导出整张表」。
 -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
@@ -90,7 +93,8 @@ function statusTagType(status: string): 'success' | 'warning' | 'danger' | 'info
 
       <p class="muted">
         共 {{ page?.total ?? 0 }} 个批次（第 {{ page?.page ?? 1 }} 页，每页
-        {{ page?.page_size ?? 50 }} 条）。筛选分页、记录列表与导出属 S06。
+        {{ page?.page_size ?? 50 }} 条）。点开批次可发起导出并下载 Excel 与 JSONL
+        （S05）；筛选分页、记录列表与证据详情属 S06。
       </p>
 
       <el-empty v-if="!runs.length && !loading" description="还没有批次：到「判一条」页上传文件、预检通过后点「开始判别（整批）」" />

@@ -235,6 +235,9 @@ export interface RunAllowedActions {
   remaining_rows?: number;
   disabled_reason: string | null;
   model_dispatch_paused: boolean;
+  /** 导出按钮；`export_disabled_reason` 为真时给出后端自己的原因。 */
+  can_export: boolean;
+  export_disabled_reason: string | null;
 }
 
 /** 失败记录摘要：编号 + 失败阶段 + 错误码；**不含证据正文**。 */
@@ -265,6 +268,57 @@ export interface StageAttemptStat {
   simulated: number;
 }
 
+// ------------------------------------------------- S05-04：导出与产物下载
+
+/** 一份已登记的导出文件；`completed` 的导出必然有两份（excel + jsonl）。 */
+export interface RunExportArtifact {
+  artifact_id: string;
+  kind: 'excel' | 'jsonl';
+  download_name: string;
+  media_type: string;
+  size_bytes: number;
+  sha256: string;
+  /** 同源地址，浏览器直接下载；后端按登记行给文件，不接受前端传路径。 */
+  download_url: string;
+}
+
+/**
+ * 一次导出。捕获字段是**worker 认领那份导出时**的快照信息：导出还在排队或运行中
+ * 时 `captured_*` 为 null（界面显示「尚未捕获快照」），不拿 `scheduled_revision`
+ * 冒充已经捕获的 revision。
+ */
+export interface RunExport {
+  export_id: string;
+  job_id: string;
+  run_id: string;
+  source: 'automatic' | 'manual';
+  job_status: JobStatus | null;
+  created_at: string;
+  scheduled_revision: number;
+  captured_at: string | null;
+  run_revision: number | null;
+  run_status_at_capture: JobStatus | null;
+  /** 捕获时的批次计数；`remaining` 不为 0 说明这份导出含未处理记录。 */
+  counts_at_capture: RunCounts | null;
+  artifacts: RunExportArtifact[];
+  error: { code?: string; message?: string; error_type?: string } | null;
+}
+
+export interface ExportListPage {
+  run_id: string;
+  page: number;
+  page_size: number;
+  total: number;
+  items: RunExport[];
+}
+
+/** POST /api/runs/{run_id}/exports 的返回：只表示**已入队**，文件由 worker 生成。 */
+export interface ExportCreated {
+  export_id: string;
+  job_id: string;
+  reused: boolean;
+}
+
 export interface RunDetail {
   run_id: string;
   original_filename: string;
@@ -285,8 +339,8 @@ export interface RunDetail {
   allowed_actions: RunAllowedActions;
   failure_summary: RunFailureSummary;
   call_statistics: { stage1: StageAttemptStat; stage2: StageAttemptStat };
-  /** S05 才产生导出文件；S04 固定为 null，界面据此显示「尚无导出」。 */
-  latest_export: null;
+  /** 最近一次导出（含排队中与失败）；一次都没排过时为 null，界面显示「尚无导出」。 */
+  latest_export: RunExport | null;
 }
 
 /** POST /api/runs 的返回：批次已排队，进度需轮询 GET /api/runs/{run_id}。 */

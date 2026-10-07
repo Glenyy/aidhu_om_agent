@@ -179,8 +179,10 @@ def test_exhausted_budget_is_reported_and_not_selectable_without_retry(tmp_path:
     assert error.value.code == "NOTHING_TO_RESUME"
     assert error.value.http_status == 409
     assert error.value.details["skipped_budget_exhausted"] == 3
-    # 被拒绝时不留任何任务与幂等记录。
-    assert probe.scalar("SELECT COUNT(*) FROM jobs") == 1
+    # 被拒绝时不留任何任务与幂等记录；剩下的两个任务都是批次本来就有的
+    # （判别各一条 + 终态排的一条自动导出，S05-03 起）。
+    assert probe.scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'classify'") == 1
+    assert probe.scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'export'") == 1
     assert probe.scalar("SELECT COUNT(*) FROM idempotency_keys") == 0
 
 
@@ -531,7 +533,9 @@ def test_same_resume_key_replays_the_original_result(tmp_path: Path) -> None:
     assert again.reused is True
     assert again.job_id == first.job_id
     assert again.response_data()["selected_records"] == first.selected_records
-    assert probe.scalar("SELECT COUNT(*) FROM jobs") == 2  # 只有最初与恢复各一条
+    # 判别任务只有最初与恢复各一条；另有一条是 partial_failed 终态排的自动导出。
+    assert probe.scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'classify'") == 2
+    assert probe.scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'export'") == 1
 
 
 def test_same_resume_key_with_a_different_body_conflicts(tmp_path: Path) -> None:
@@ -643,7 +647,8 @@ def test_resume_end_to_end_through_http_and_worker(tmp_path: Path) -> None:
     worker = make_worker(config, client_factory=flaky_factory(fail_times=3, seen=seen))
     worker.start()
     try:
-        assert worker.run_forever(max_idle_rounds=1) == 1
+        # 恢复的判别任务 + 它跑完以后排上的自动导出，同一轮里各消费一次。
+        assert worker.run_forever(max_idle_rounds=1) == 2
     finally:
         worker.stop()
 

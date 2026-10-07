@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -38,6 +39,7 @@ from .repositories import jobs as jobs_repo
 from .repositories import records as records_repo
 from .repositories import runs as runs_repo
 from .services.batches import BatchError
+from .services.exports import execute_export, schedule_automatic_export
 from .services.judging import execute_record
 from .storage import Database, DatabaseError, DatabaseBusyError, utc_now, write_transaction
 
@@ -51,6 +53,44 @@ LOCK_FILENAME = "worker.lock"
 
 #: 无任务时的默认轮询间隔（[plan/10 §4.8]“短间隔检查队列”）。
 DEFAULT_POLL_SECONDS = 1.0
+
+#: 导出失败信息的最长长度；错误会被发给浏览器，不把整段堆栈塞进任务行。
+EXPORT_ERROR_LIMIT = 300
+
+
+#: 错误文本里仍残留的绝对路径：Windows 盘符与 UNC 开头，吃到空白或引号为止。
+#: 只认这两种形态，不碰 ``1/2``、``/runs`` 这类正常文本。
+_ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)[^\s'\"]*")
+
+
+def export_error_message(exc: BaseException, outputs_root: Path) -> str:
+    """导出异常 → **不含本机路径**的一行说明。
+
+    `OSError` 的 `str()` 自带完整路径（导出目录在用户机器上的位置），而任务错误
+    会被 `GET /api/runs/{run_id}/exports` 原样发给浏览器；[plan/08 §1] 要求读接口
+    不发本机路径。这里把导出根目录换成 ``<outputs>``，只留相对位置。
+
+    **必须连 `repr` 形态一起替换**：`OSError.__str__` 用 `repr()` 拼 `filename`，
+    Windows 路径里的每个反斜杠在字符串里是**两个字符**；只按 `str(path)` 替换，
+    在真实的 mkdir/open 失败上永远不命中（而那种失败恰恰最常带路径）。除根目录外
+    再兜一层：残留的盘符/UNC 绝对路径统一换成 ``<path>``。
+    """
+    text = (str(exc) or type(exc).__name__).strip()
+    root = str(outputs_root)
+    variants = {root, root.replace("\\", "/")}
+    variants |= {variant.replace("\\", "\\\\") for variant in variants}
+    for variant in sorted(variants, key=len, reverse=True):
+        if variant:
+            # 根目录连同它后面的相对位置一起换掉：只换根会把 `\run1\exp1` 这种
+            # 片段留在消息里，读起来像路径残渣。
+            text = re.sub(
+                re.escape(variant) + r"(?:[\\/][^\s'\"]*)?",
+                "<outputs>",
+                text,
+                flags=re.IGNORECASE,
+            )
+    text = _ABSOLUTE_PATH.sub("<path>", text)
+    return text.splitlines()[0][:EXPORT_ERROR_LIMIT]
 
 #: 系统性故障错误码：认证失败、模型或必要参数无效、未预期的永久错误
 #: （[plan/10 §7]）。它们会污染同一批次其余记录，因此**停止本轮消费**并把
@@ -149,6 +189,32 @@ class WorkerLock:
         self._write_owner(owner)
         return True
 
+    def probe(self) -> bool:
+        """只探测锁是否空闲：临时加锁后立刻退回，**不写归属信息**。
+
+        与 `acquire` 的区别是它不改变锁文件内容、不在本进程留下持锁状态，因此可以
+        被 CLI 的 ``--wait`` 反复调用。判断「有没有 worker 在跑」依据的是操作系统
+        锁本身——进程被杀后锁自动释放，不会像时间戳那样把死进程判成活的
+        （[plan/10 §4] 禁止按 `last_activity_at` 猜进程存活）。
+
+        返回 ``False`` 只说明**当下**拿不到锁（有 worker 持有，或本进程已持有）。
+        """
+        if self._fd is not None:
+            # 本进程已持有：此时「空闲」这个判断没有意义，一律当作不可探测。
+            return False
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self._path, os.O_RDWR | os.O_CREAT)
+        try:
+            _lock_fd(fd)
+        except OSError:
+            os.close(fd)
+            return False
+        try:
+            _unlock_fd(fd)
+        finally:
+            os.close(fd)
+        return True
+
     def release(self) -> None:
         """释放锁；**不删除锁文件**（删除会让并发等待者锁到不同的 inode）。"""
         fd, self._fd = self._fd, None
@@ -178,13 +244,19 @@ def _now_iso() -> str:
 
 @dataclass(frozen=True)
 class JobOutcome:
-    """一次任务执行的结局；供 CLI 与测试核对，不进入接口合同。"""
+    """一次任务执行的结局；供 CLI 与测试核对，不进入接口合同。
+
+    ``counts`` 对判别任务是记录状态计数，对导出任务是**捕获时**的计数
+    （两者同一来源：`services.batches.counts_of`）。``export_id`` 只在导出任务上出现。
+    """
 
     job_id: str
     run_id: str
     status: str
     counts: dict[str, int]
     records_attempted: int
+    kind: str = jobs_repo.CLASSIFY_KIND
+    export_id: str | None = None
 
 
 class Worker:
@@ -275,10 +347,14 @@ class Worker:
 
         系统性故障（存储层故障或模型调用层面的认证/配置错误）都走
         `_fail_systemically`：暂停判别、保留队列、如实标记失败。
+
+        **导出任务走另一条收尾路径**：它失败只标任务自己，见 `_execute_export`。
         """
         job = self._claim()
         if job is None:
             return None
+        if job.kind == jobs_repo.EXPORT_KIND:
+            return self._execute_export(job)
         try:
             return self._execute(job)
         except (DatabaseError, WorkerStateError) as exc:
@@ -316,15 +392,22 @@ class Worker:
     # ---------------------------------------------------------------- 认领
 
     def _claim(self) -> jobs_repo.JobRow | None:
-        """短事务里认领一个 queued 任务；暂停判别时**任务保留在队列里**。"""
+        """短事务里认领一个 queued 任务；暂停判别时**只认领导出任务**。
+
+        闸门管的是模型派发，不是队列：`model_dispatch_paused` 时判别任务保留在
+        队列里等修好，已经排上的导出照常跑完（[plan/10 §4.7]）。
+        """
         connection = self._database.connect()
         try:
             with write_transaction(connection) as tx:
                 state = jobs_repo.get_runtime_state(tx)
-                if state.model_dispatch_paused:
-                    return None
+                kinds = (
+                    (jobs_repo.EXPORT_KIND,)
+                    if state.model_dispatch_paused
+                    else jobs_repo.JOB_KINDS
+                )
                 return jobs_repo.claim_next_job(
-                    tx, worker_id=self.worker_id, now=utc_now()
+                    tx, worker_id=self.worker_id, now=utc_now(), kinds=kinds
                 )
         except DatabaseBusyError:
             # 并发写入只是暂时冲突；下一轮再试，不判为系统性故障。
@@ -373,6 +456,57 @@ class Worker:
                 )
 
         return self._finalize(job, attempted=attempted)
+
+    def _execute_export(self, job: jobs_repo.JobRow) -> JobOutcome | None:
+        """执行一个导出任务：捕获快照 → 写两份文件 → 成对登记。
+
+        导出失败**只标任务自己**：不写 `runs`、不设判别闸门、不清空任何分类结果。
+        导出是判别之后的一条独立支路（[plan/10 §7—§8]），导出没做成不该把用户
+        已经拿到的标签作废；反过来，判别暂停也不该挡着导出。
+        """
+        try:
+            outcome = execute_export(
+                self._database, job=job, outputs_root=self._config.paths.outputs
+            )
+        except Exception as exc:  # noqa: BLE001 - 见下方说明
+            # 导出可能因为磁盘、快照不自洽或存储冲突失败，这些都不该冒泡成
+            # 「系统性故障」去改批次状态。如实记在任务上，让界面显示失败原因。
+            self._fail_export(job, exc)
+            return None
+        return JobOutcome(
+            job_id=job.job_id,
+            run_id=job.run_id,
+            status=jobs_repo.JOB_COMPLETED,
+            counts=dict(outcome.counts),
+            records_attempted=0,
+            kind=jobs_repo.EXPORT_KIND,
+            export_id=outcome.export_id,
+        )
+
+    def _fail_export(self, job: jobs_repo.JobRow, exc: BaseException) -> None:
+        """把导出任务置为失败，**不触碰批次**。
+
+        错误信息里的导出根目录换成 ``<outputs>``：这条 message 会被
+        `GET /api/runs/{run_id}/exports` 原样发给浏览器，而 OSError 的 `str()`
+        自带完整本机路径；[plan/08 §1] 要求读接口不发本机路径。
+        """
+        error = {
+            "code": "EXPORT_FAILED",
+            "message": export_error_message(exc, self._config.paths.outputs),
+            "error_type": type(exc).__name__,
+        }
+        connection = self._database.connect()
+        try:
+            with write_transaction(connection) as tx:
+                jobs_repo.finish_job(
+                    tx,
+                    job_id=job.job_id,
+                    status=jobs_repo.JOB_FAILED,
+                    finished_at=utc_now(),
+                    error=error,
+                )
+        finally:
+            connection.close()
 
     def _apply_reopen(self, job: jobs_repo.JobRow) -> int:
         """把任务里的**重开计划**落实成新的预算轮次；返回实际重开数。
@@ -497,12 +631,20 @@ class Worker:
                     finished_at=now,
                     result={"counts": counts, "attempted": attempted},
                 )
+                # 终态与自动导出同一事务：界面看到 completed/partial_failed 时，
+                # 导出任务已经在队列里了。`failed`（系统性故障）不排导出——
+                # 那条路径在 `_fail_systemically`，且批次本身没有可导出的结论。
+                export_id = schedule_automatic_export(
+                    tx, run_id=run.run_id, revision=run.revision, created_at=now
+                )
                 return JobOutcome(
                     job_id=job.job_id,
                     run_id=run.run_id,
                     status=status,
                     counts=counts,
                     records_attempted=attempted,
+                    kind=jobs_repo.CLASSIFY_KIND,
+                    export_id=export_id,
                 )
         finally:
             connection.close()
@@ -517,6 +659,9 @@ class Worker:
 
         暂停闸门存在库里而不是进程里：崩溃重启后仍然有效。导出侧不读这个闸门，
         所以「暂停判别、导出仍可执行」自然成立。
+
+        批次标 `failed` 时**不排自动导出**：没有可交付的分类结论，排一份导出只会
+        误导（用户在修好原因后用 `POST /api/runs/{id}/exports` 手动导出）。
         """
         reason = {"code": code, "message": message, "job_id": job.job_id}
         connection = self._database.connect()
@@ -552,6 +697,7 @@ def _run_status(
 
 __all__ = [
     "DEFAULT_POLL_SECONDS",
+    "EXPORT_ERROR_LIMIT",
     "LOCK_FILENAME",
     "MODES",
     "MODE_MOCK",
@@ -564,4 +710,5 @@ __all__ = [
     "WorkerLock",
     "WorkerLockError",
     "WorkerStateError",
+    "export_error_message",
 ]

@@ -133,12 +133,19 @@ GET /runs 列表默认每页 50 条，上限 100，按 created_at、run_id 倒�
 | counts | total、valid、input_invalid、classified、failed、remaining、processed、review_required |
 | progress_percent | processed / total × 100，展示保留一位小数 |
 | active_job | 活跃判别任务；没有时 null |
+| recent_jobs | 最近若干次任务摘要（job_id、kind、mode、status、时间、当前记录/阶段、错误）；批次结束后 active_job 为 null，界面靠它看到刚跑完那次落到什么状态 |
 | execution_control | 后端模型消费是否暂停、暂停原因及最近 worker 标识；不据时间戳认定进程死亡 |
 | model_config | 两阶段模型与已验证非敏感参数，不含凭据 |
 | versions | 程序、规则、提示词、结构和输入合同版本 |
 | last_error | 脱敏错误；没有时 null |
 | allowed_actions | can_resume、can_retry_failed、can_export、可选/重开/跳过数、finalization_required 与禁用原因 |
+| failure_summary | 失败记录摘要：count、受限条数的 items（record_key/record_id/source_row/order_index/failure_stage/code/message/retryable/attempt_count）与 truncated |
+| call_statistics | 按阶段（stage1/stage2）的调用尝试统计：attempts、succeeded、failed、unknown_after_interrupt、simulated；恢复前后阶段一 attempts 不变即证明检查点被复用而非整条重跑 |
 | latest_export | 最近导出任务与文件标识；没有时 null |
+
+`recent_jobs`、`failure_summary`、`call_statistics` 由 2026-10-07 用户决定**追认进本节**：它们是界面验证面要求的可核对值（批次结束后仍能看到刚跑完任务的状态、失败摘要，以及「其中模拟」的调用计数），**均为只读**，不改变写入路径与状态机。`execution_control` 里的 `last_worker` 与 `latest_export` **本就在本节合同内**，不是新增字段——S04 阶段 `latest_export` 恒为 `null`（导出属 S05，不登记假产物）。
+
+`last_error` 的**目标语义**是本行的「脱敏错误」。S04 当前实现对 `partial_failed` 批次写入 `{code: PARTIAL_FAILED, failed_count: N}`（批次收尾摘要，非系统性故障；系统性故障由 `execution_control.model_dispatch_paused` 表达），属实现与该语义的偏差。**2026-10-07 用户决定：在 S06 做语义分工**——收尾摘要改由 `failure_summary` 承载，`last_error` 只保留真正的错误，界面横幅相应改为条件显示（并补上现在未显示的 `failed_count`）。S06 之前按现状保留。
 
 counts.failed 只计算有效记录的技术失败；input_invalid 单列。processed = classified + failed + input_invalid；remaining = total - processed。review_required 是 classified 的子集，不加到 processed。
 

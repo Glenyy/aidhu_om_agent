@@ -222,12 +222,35 @@ def test_run_detail_reports_the_full_contract(
     assert data["progress_percent"] == 100.0
     assert data["counts"]["review_required"] >= 1  # forced_review 情境
     # 批次结束后没有活跃任务，但最近任务仍在：界面靠它显示上一轮的结局与错误。
+    # 最近在前：终态时排上的自动导出（S05-03）排在判别任务之前。
     assert data["active_job"] is None
-    assert len(data["recent_jobs"]) == 1
+    assert len(data["recent_jobs"]) == 2
+    assert data["recent_jobs"][0]["kind"] == "export"
+    assert data["recent_jobs"][0]["mode"] == "automatic"
     assert data["recent_jobs"][0]["status"] == "completed"
-    assert data["recent_jobs"][0]["mode"] == "initial"
-    # 导出属 S05：这里如实为 null，不登记假产物。
-    assert data["latest_export"] is None
+    assert data["recent_jobs"][1]["kind"] == "classify"
+    assert data["recent_jobs"][1]["mode"] == "initial"
+    assert data["recent_jobs"][1]["status"] == "completed"
+    # 导出概况自 S05-04 起是真值：终态那次自动导出已经被 worker 跑完，两份文件登记
+    # 齐全。捕获信息与该次导出的登记一致，不是拿 scheduled_revision 冒充。
+    export = data["latest_export"]
+    assert export is not None
+    assert export["source"] == "automatic"
+    assert export["job_id"] == data["recent_jobs"][0]["job_id"]
+    assert export["job_status"] == "completed"
+    assert export["captured_at"] and export["run_status_at_capture"] == "completed"
+    assert export["run_revision"] == data["revision"]
+    assert export["counts_at_capture"]["remaining"] == 0
+    assert export["error"] is None
+    assert [item["kind"] for item in export["artifacts"]] == ["excel", "jsonl"]
+    for item in export["artifacts"]:
+        assert item["download_url"] == f"/api/artifacts/{item['artifact_id']}/download"
+        assert item["download_name"].endswith(
+            ".xlsx" if item["kind"] == "excel" else ".jsonl"
+        )
+    # 导出在飞也可以导出（S05-04）：这里导出已结束，按钮回到可用。
+    assert data["allowed_actions"]["can_export"] is True
+    assert data["allowed_actions"]["export_disabled_reason"] is None
     assert data["last_error"] is None
 
 

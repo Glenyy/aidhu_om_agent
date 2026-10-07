@@ -1,26 +1,46 @@
 <!--
-  S04-07：批次详情（最小形态）。
+  S04-07：批次详情（最小形态）＋ S05-05：导出区块。
 
   展示后端返回的状态、计数、进度、当前任务、调用统计、失败摘要与 allowed_actions，
-  不推导业务结论。两个必须说清楚的地方：
+  不推导业务结论。三个必须说清楚的地方：
 
   1. **模拟标识**：调用统计里只要出现过模拟调用，就显著标注——模拟结果不能当作
      模型质量证据（review-and-handoff 规则 §4.3）。
   2. **worker 状态措辞**：只报「最近一次登记的 worker 与上线时间」，**不据时间戳
      断言进程已退出**（S04-07 定稿要点）。worker 可能正在处理一条长请求。
+  3. **导出（S05-05）**：按钮与禁用原因来自 `allowed_actions.can_export`；快照信息
+     来自 `latest_export.captured_*`，未捕获就说「尚未捕获快照」，不拿别的数字顶替；
+     `counts_at_capture.remaining` 不为 0 时必须明示这不是完整成功批次的导出。
 
-  轮询约 2 秒，批次进入终态后停止。
+  轮询约 2 秒，批次进入终态后停止；**导出未完成时导出区块单独继续轮询**，直到两份
+  文件可下载（plan/10 §9）。
 -->
 <script setup lang="ts">
 import { ElMessage } from 'element-plus';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
-import { ApiError, fetchRun, newIdempotencyKey, resumeRun } from '../api/client';
-import type { ResumeResult, RunDetail } from '../types/api';
+import {
+  ApiError,
+  artifactDownloadUrl,
+  createExport,
+  fetchExports,
+  fetchRun,
+  newIdempotencyKey,
+  resumeRun,
+} from '../api/client';
+import type {
+  ExportCreated,
+  ExportListPage,
+  ResumeResult,
+  RunDetail,
+  RunExport,
+} from '../types/api';
 
 const TERMINAL_STATUS = new Set(['completed', 'partial_failed', 'failed']);
 const POLL_INTERVAL_MS = 2000;
+/** 导出还在队列里或正在写文件；两种状态都要继续轮询。 */
+const EXPORT_ACTIVE = new Set(['queued', 'running']);
 
 const route = useRoute();
 const router = useRouter();
@@ -33,7 +53,15 @@ const submitting = ref(false);
 /** 最近一次恢复入队的响应；界面据此显示选中数/重开数，与提交时的复查同源。 */
 const lastResume = ref<ResumeResult | null>(null);
 
+const exportPage = ref<ExportListPage | null>(null);
+const exportHint = ref<string | null>(null);
+const exportLoading = ref(false);
+const exportSubmitting = ref(false);
+/** 最近一次手动导出入队的响应（只表示已入队）。 */
+const lastExport = ref<ExportCreated | null>(null);
+
 let pollTimer: number | null = null;
+let exportTimer: number | null = null;
 
 const actions = computed(() => detail.value?.allowed_actions ?? null);
 const paused = computed(
@@ -62,11 +90,60 @@ const totalAttempts = computed(() => {
   return stats.stage1.attempts + stats.stage2.attempts;
 });
 
+const exportsList = computed<RunExport[]>(() => exportPage.value?.items ?? []);
+
+/** 有导出还在排队或正在生成文件——导出的单独轮询只在这种时候开着。 */
+const exportInFlight = computed(() =>
+  exportsList.value.some((item: RunExport) => EXPORT_ACTIVE.has(item.job_status ?? '')),
+);
+
+/** 最近一次导出的未处理数；null 表示还没捕获快照，0 表示当时全都处理完了。 */
+const exportRemaining = computed(() => {
+  const counts = detail.value?.latest_export?.counts_at_capture;
+  return counts ? counts.remaining : null;
+});
+
 function stopPolling(): void {
   if (pollTimer !== null) {
     window.clearInterval(pollTimer);
     pollTimer = null;
   }
+}
+
+function stopExportPolling(): void {
+  if (exportTimer !== null) {
+    window.clearInterval(exportTimer);
+    exportTimer = null;
+  }
+}
+
+/**
+ * 导出区块的轮询，与批次轮询**分开**：批次进入终态后批次轮询会停，但终态那次自动
+ * 导出还要几十毫秒到几秒才写完，界面必须继续跟到两份文件都出来（plan/10 §9）。
+ */
+function syncExportPolling(): void {
+  if (exportInFlight.value) {
+    if (exportTimer === null) {
+      exportTimer = window.setInterval(() => void loadExports(), POLL_INTERVAL_MS);
+    }
+  } else {
+    stopExportPolling();
+  }
+}
+
+async function loadExports(): Promise<void> {
+  exportLoading.value = true;
+  try {
+    exportPage.value = await fetchExports(runId.value, 1, 50);
+    exportHint.value = null;
+  } catch (error) {
+    exportHint.value =
+      error instanceof ApiError ? `[${error.code}] ${error.message}` : String(error);
+    stopExportPolling();
+  } finally {
+    exportLoading.value = false;
+  }
+  syncExportPolling();
 }
 
 async function load(): Promise<void> {
@@ -81,6 +158,11 @@ async function load(): Promise<void> {
   } finally {
     loading.value = false;
   }
+  // 导出区块自己轮询时不必在这里重复拉一次；只有在它停下来时才顺手同步，
+  // 以免批次刚跑完、自动导出刚排上那一刻界面还显示「还没排过导出」。
+  if (!exportInFlight.value) {
+    await loadExports();
+  }
   if (shouldPoll.value) {
     if (pollTimer === null) {
       pollTimer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
@@ -91,14 +173,42 @@ async function load(): Promise<void> {
 }
 
 onMounted(() => void load());
-onBeforeUnmount(stopPolling);
+onBeforeUnmount(() => {
+  stopPolling();
+  stopExportPolling();
+});
 // 从列表跳到另一个批次时组件被复用，参数变化要重新加载并重开轮询。
 watch(runId, () => {
   detail.value = null;
   lastResume.value = null;
+  exportPage.value = null;
+  lastExport.value = null;
   stopPolling();
+  stopExportPolling();
   void load();
 });
+
+async function doExport(): Promise<void> {
+  if (exportSubmitting.value) return;
+  exportSubmitting.value = true;
+  exportHint.value = null;
+  try {
+    // 一次用户动作生成一个键：网络结果不确定时用同一个键重试不会排进两份导出。
+    lastExport.value = await createExport(runId.value, newIdempotencyKey());
+    ElMessage.success(
+      lastExport.value.reused
+        ? `命中幂等键：沿用已入队的导出 ${lastExport.value.export_id}`
+        : `已入队导出 ${lastExport.value.export_id}；文件由 worker 生成，完成后这里出现下载链接`,
+    );
+    await loadExports();
+    await load();
+  } catch (error) {
+    exportHint.value =
+      error instanceof ApiError ? `[${error.code}] ${error.message}` : String(error);
+  } finally {
+    exportSubmitting.value = false;
+  }
+}
 
 async function doResume(retryFailed: boolean): Promise<void> {
   if (submitting.value) return;
@@ -380,6 +490,165 @@ function stageText(stage: string | null): string {
           show-icon
           :title="`上次提交：选中 ${lastResume.selected_records} 条，计划重开 ${lastResume.renewed_campaigns} 轮，预算耗尽跳过 ${lastResume.skipped_budget_exhausted} 条，需新批次跳过 ${lastResume.skipped_needs_new_batch} 条，仅收尾=${lastResume.finalize_only}，派发暂停=${lastResume.dispatch_paused}`"
         />
+      </el-card>
+
+      <!-- 导出（S05-05）：发起一份、看状态与历史、下载两份文件 -->
+      <el-card class="panel">
+        <template #header>
+          <div class="header-row">
+            <span>导出（Excel + JSONL）</span>
+            <div>
+              <el-tag v-if="exportInFlight" type="primary" size="small">
+                导出进行中，约 2 秒刷新
+              </el-tag>
+              <el-tag v-else type="info" size="small">没有进行中的导出，已停止刷新</el-tag>
+              <el-button class="refresh" :loading="exportLoading" @click="loadExports">
+                刷新导出
+              </el-button>
+            </div>
+          </div>
+        </template>
+
+        <el-alert v-if="exportHint" type="error" :closable="false" show-icon :title="exportHint" />
+
+        <p class="muted">
+          一次导出生成<strong>两份</strong>文件：Excel（分类结果、复核清单、失败清单、运行概况）
+          与 JSONL（两阶段明细）。点击只表示<strong>已入队</strong>，文件由 worker 认领时才生成；
+          快照也在那时捕获，所以任意批次状态都可以导出，导出内容可能含未处理记录。
+        </p>
+
+        <div class="action-row">
+          <el-button
+            type="primary"
+            :disabled="!actions?.can_export || exportSubmitting"
+            :loading="exportSubmitting"
+            @click="doExport"
+          >
+            导出一份（Excel + JSONL）
+          </el-button>
+          <span v-if="actions?.export_disabled_reason" class="muted">
+            {{ actions.export_disabled_reason }}
+          </span>
+          <span v-else class="muted">
+            导出与判别互不阻塞：判别正在跑时导出的是一份当前进度的快照。
+          </span>
+        </div>
+
+        <el-alert
+          v-if="lastExport"
+          class="block"
+          type="info"
+          :closable="false"
+          show-icon
+          :title="`上次提交：export_id ${lastExport.export_id}，job_id ${lastExport.job_id}${
+            lastExport.reused ? '（命中幂等键，沿用第一次的入队结果）' : ''
+          }`"
+        />
+
+        <template v-if="detail.latest_export">
+          <h4>最近一次导出</h4>
+          <p class="muted">
+            导出 <span class="mono">{{ detail.latest_export.export_id }}</span>｜来源
+            {{ detail.latest_export.source === 'automatic' ? '自动（批次终态时排入）' : '手动' }}｜状态
+            {{ detail.latest_export.job_status ?? '—' }}｜排队于
+            {{ detail.latest_export.created_at }}
+          </p>
+          <p v-if="detail.latest_export.captured_at" class="muted">
+            快照捕获于 {{ detail.latest_export.captured_at }}（批次 revision
+            {{ detail.latest_export.run_revision }}，当时状态
+            {{ detail.latest_export.run_status_at_capture }}）
+          </p>
+          <p v-else class="muted">
+            <strong>尚未捕获快照</strong>：导出任务还在队列里（或被暂停的派发挡着），
+            需要有一个正在运行的 worker 认领它。
+          </p>
+
+          <el-alert
+            v-if="exportRemaining"
+            class="block"
+            type="warning"
+            :closable="false"
+            show-icon
+            :title="`这份导出含未处理记录（remaining = ${exportRemaining}）：它不是一份完整成功批次的导出，不能当作「全部判完」的证据。`"
+          />
+          <el-alert
+            v-if="detail.latest_export.job_status === 'failed'"
+            class="block"
+            type="error"
+            :closable="false"
+            show-icon
+            :title="`最近一次导出失败：${
+              detail.latest_export.error?.code ?? 'EXPORT_FAILED'
+            } ${detail.latest_export.error?.message ?? ''}`"
+          >
+            <p>
+              失败只影响这一次导出：<strong>分类结果与批次状态都没有被改动</strong>。
+              重新导出会生成新的 export_id 与新文件，不覆盖原文件，也不覆盖人工已改的文件。
+            </p>
+          </el-alert>
+        </template>
+        <el-empty v-else description="这个批次还没有排过导出" />
+
+        <h4>导出历史（{{ exportPage?.total ?? 0 }} 次）</h4>
+        <el-empty v-if="!exportsList.length" description="还没有导出记录" />
+        <el-table v-else :data="exportsList" border>
+          <el-table-column prop="created_at" label="排队时间" width="180" />
+          <el-table-column label="来源" width="90">
+            <template #default="{ row }">
+              {{ row.source === 'automatic' ? '自动' : '手动' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="120">
+            <template #default="{ row }">
+              <el-tag :type="statusTagType(row.job_status ?? '')" size="small">
+                {{ row.job_status ?? '—' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="快照（捕获时间 / revision / 当时状态）" width="300">
+            <template #default="{ row }">
+              <template v-if="row.captured_at">
+                {{ row.captured_at }} / {{ row.run_revision }} /
+                {{ row.run_status_at_capture }}
+              </template>
+              <template v-else>尚未捕获快照</template>
+            </template>
+          </el-table-column>
+          <el-table-column label="未处理" width="90">
+            <template #default="{ row }">
+              {{ row.counts_at_capture ? row.counts_at_capture.remaining : '—' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="文件" min-width="380">
+            <template #default="{ row }">
+              <div v-if="row.artifacts.length">
+                <div v-for="artifact in row.artifacts" :key="artifact.artifact_id">
+                  <el-link
+                    type="primary"
+                    :href="artifactDownloadUrl(artifact.artifact_id)"
+                    target="_blank"
+                  >
+                    {{ artifact.download_name }}
+                  </el-link>
+                  <span class="muted">
+                    （{{ artifact.size_bytes }} 字节，sha256
+                    {{ artifact.sha256.slice(0, 12) }}…）
+                  </span>
+                </div>
+              </div>
+              <span v-else-if="row.job_status === 'failed'" class="muted">
+                导出失败：{{ row.error?.code ?? 'EXPORT_FAILED' }}
+                {{ row.error?.message ?? '' }}——分类结果未受影响，可重新导出
+              </span>
+              <span v-else class="muted">尚未生成（导出任务还没跑完）</span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <p class="muted">
+          下载由浏览器直接处理：Excel 用表格软件打开后，四张表的行序与「序号」列可直接
+          和 JSONL 逐条对齐；「运行概况」表写明未处理数与被截断单元格的位置。文件落在
+          <span class="mono">outputs/&lt;批次&gt;/&lt;导出&gt;/</span>，每次导出各占一个目录。
+        </p>
       </el-card>
 
       <el-card class="panel">

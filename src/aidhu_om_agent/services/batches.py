@@ -563,19 +563,38 @@ def resume_run(
         connection.close()
 
 
+def _export_action(active_export: jobs_repo.JobRow | None) -> dict[str, Any]:
+    """`can_export` 与禁用原因（S05-04）。
+
+    导出与判别**互不阻塞**：判别正在跑时照样可以导出一份当前进度的快照（[plan/08
+    §7]，快照在 worker 认领时才捕获）。唯一挡住按钮的是**已经有一份导出在飞**——
+    见 `exports.create_manual_export` 的同名检查；两处用同一条规则，避免出现
+    「按钮说能导出、点了却 409」。
+    """
+    if active_export is None:
+        return {"can_export": True, "export_disabled_reason": None}
+    return {
+        "can_export": False,
+        "export_disabled_reason": "该批次已有排队或运行中的导出任务，等它完成后可再导出一份",
+    }
+
+
 def allowed_actions(
     connection: sqlite3.Connection, run_id: str
 ) -> dict[str, Any]:
     """批次详情里的 `allowed_actions`（[plan/08 §5]）。
 
     与提交路径共用 `plan_resume`：界面上显示的选中数、重开数与提交时的复查
-    走同一份逻辑，不会出现「按钮说能恢复、点了却拒绝」。
+    走同一份逻辑，不会出现「按钮说能恢复、点了却拒绝」。导出同理，见 `_export_action`。
     """
     run = runs_repo.get_run(connection, run_id)
     if run is None:
         raise BatchError("NOT_FOUND", f"未知 run_id：{run_id}", http_status=404)
 
     active = jobs_repo.find_active_classification(connection, run_id)
+    active_export = jobs_repo.find_active_job(
+        connection, run_id, kind=jobs_repo.EXPORT_KIND
+    )
     state = jobs_repo.get_runtime_state(connection)
     counts = records_repo.count_by_status(connection, run_id)
 
@@ -590,6 +609,7 @@ def allowed_actions(
             "skipped_needs_new_batch": 0,
             "disabled_reason": "该批次已有排队或运行中的判别任务",
             "model_dispatch_paused": state.model_dispatch_paused,
+            **_export_action(active_export),
         }
 
     if run.status not in RESUMABLE_RUN_STATUSES:
@@ -603,6 +623,7 @@ def allowed_actions(
             "skipped_needs_new_batch": 0,
             "disabled_reason": "批次已结束且没有可恢复的记录",
             "model_dispatch_paused": state.model_dispatch_paused,
+            **_export_action(active_export),
         }
 
     plain = plan_resume(connection, run_id, retry_failed=False)
@@ -620,8 +641,8 @@ def allowed_actions(
         "remaining_rows": counts["pending"] + counts["stage1_done"],
         "disabled_reason": None if plain.has_work else plain.reason_when_empty,
         "model_dispatch_paused": state.model_dispatch_paused,
+        **_export_action(active_export),
     }
-
 
 # --------------------------------------------- 批次列表与详情（S04-07）
 
@@ -643,14 +664,17 @@ RECENT_JOB_LIMIT = 10
 _MODEL_CONFIG_KEYS = ("stage1", "stage2", "execution")
 
 
-def _counts_of(
+def counts_of(
     run: runs_repo.RunRow, by_status: dict[str, int], review_required: int
 ) -> dict[str, int]:
-    """详情计数；口径固定为 [plan/08 §5]。
+    """批次计数；口径固定为 [plan/08 §5]。
 
     ``processed = classified + failed + input_invalid``、``remaining = total -
     processed``；``review_required`` 是 ``classified`` 的子集，不加进 ``processed``。
     计数与状态在同一读事务里取（调用方负责），因此不会出现「failed=1 而失败列表为空」。
+
+    **导出也用它**（S05）：概况表的计数与界面显示的数字必须是同一个公式，否则
+    「界面说剩 3 条、概况表说剩 2 条」这种偏差只能靠人去发现。
     """
     classified = by_status["completed"]
     failed = by_status["failed"]
@@ -763,7 +787,7 @@ def list_batch_runs(
             items = []
             for run in rows:
                 by_status = records_repo.count_by_status(snapshot, run.run_id)
-                counts = _counts_of(
+                counts = counts_of(
                     run,
                     by_status,
                     records_repo.count_review_required(snapshot, run.run_id),
@@ -803,8 +827,15 @@ def run_detail(
     - ``recent_jobs``：该批次最近的任务（``active_job`` 在批次结束后为 null，
       界面仍需要看到刚跑完那个任务落到了什么状态）。
 
-    ``latest_export`` 固定为 null：导出在 S05 才产生文件，本阶段不登记假产物。
+    ``latest_export`` 是该批次最近一次导出（[plan/08 §7]）：终态那次自动导出与
+    用户在界面上点的手动导出都算，一次都没排过时为 ``null``。**捕获前**（导出任务
+    还在排队或运行）里面只有 `job_status`，`captured_*` 为 null——界面据此显示
+    「尚未捕获快照」，不把 `scheduled_revision` 冒充成已捕获的 revision。
     """
+    # 局部导入：`services.exports` 在模块层要用本模块的 `counts_of`（快照与界面共用
+    # 同一个计数公式），模块层互相导入会成环。这里只在真正读详情时才需要它。
+    from .exports import latest_export_view
+
     connection = database.connect()
     try:
         with read_transaction(connection) as snapshot:
@@ -813,7 +844,7 @@ def run_detail(
                 raise BatchError("NOT_FOUND", f"未知 run_id：{run_id}", http_status=404)
 
             by_status = records_repo.count_by_status(snapshot, run_id)
-            counts = _counts_of(
+            counts = counts_of(
                 run, by_status, records_repo.count_review_required(snapshot, run_id)
             )
             failure_rows = records_repo.list_record_failures(
@@ -866,7 +897,7 @@ def run_detail(
                     "truncated": failure_total > len(failure_rows),
                 },
                 "call_statistics": records_repo.attempt_statistics(snapshot, run_id),
-                "latest_export": None,
+                "latest_export": latest_export_view(snapshot, run_id),
             }
     finally:
         connection.close()
@@ -887,6 +918,7 @@ __all__ = [
     "ResumeResult",
     "RunCreation",
     "allowed_actions",
+    "counts_of",
     "create_run",
     "list_batch_runs",
     "load_parsed_input",

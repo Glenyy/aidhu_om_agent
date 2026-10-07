@@ -4,6 +4,8 @@
 import axios from 'axios';
 
 import type {
+  ExportCreated,
+  ExportListPage,
   JobPayload,
   JudgeCreated,
   JudgeMode,
@@ -170,4 +172,37 @@ export function resumeRun(
       { headers: { 'Idempotency-Key': idempotencyKey } },
     ),
   );
+}
+
+// ------------------------------------------------- S05-04：导出与文件下载
+
+/**
+ * 排一份手动导出。请求体是空对象；响应只表示**已入队**，两份文件由 worker 生成，
+ * 需要轮询导出历史（或详情里的 `latest_export`）看进度。
+ */
+export function createExport(runId: string, idempotencyKey: string): Promise<ExportCreated> {
+  return unwrap<ExportCreated>(
+    http.post<SuccessEnvelope<ExportCreated>>(
+      `/runs/${runId}/exports`,
+      {},
+      { headers: { 'Idempotency-Key': idempotencyKey } },
+    ),
+  );
+}
+
+/** 导出历史，新→旧；含排队中与失败的导出。 */
+export function fetchExports(runId: string, page = 1, pageSize = 50): Promise<ExportListPage> {
+  return unwrap<ExportListPage>(
+    http.get<SuccessEnvelope<ExportListPage>>(`/runs/${runId}/exports`, {
+      params: { page, page_size: pageSize },
+    }),
+  );
+}
+
+/**
+ * 产物下载地址。下载由浏览器直接处理（后端返回文件本体而非 JSON 封套），
+ * 因此这里只给出 URL，不经过 axios。后端按登记行定位文件并给出下载名。
+ */
+export function artifactDownloadUrl(artifactId: string): string {
+  return `/api/artifacts/${encodeURIComponent(artifactId)}/download`;
 }

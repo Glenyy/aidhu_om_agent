@@ -416,7 +416,8 @@ def test_worker_completes_a_batch_in_mock_mode(tmp_path: Path) -> None:
     worker = make_worker(config, client_factory=correct_factory(calls))
     worker.start()
     try:
-        assert worker.run_forever(max_idle_rounds=1) == 1
+        # 判别任务 + 它终态时排上的自动导出（S05-03）；导出不调用模型。
+        assert worker.run_forever(max_idle_rounds=1) == 2
     finally:
         worker.stop()
 
@@ -458,11 +459,14 @@ def test_two_batches_are_consumed_serially(tmp_path: Path) -> None:
     worker = make_worker(config, client_factory=correct_factory())
     worker.start()
     try:
-        assert worker.run_forever(max_idle_rounds=1) == 2
+        # 两个判别任务 + 两条自动导出（每个批次终态各排一条）。
+        assert worker.run_forever(max_idle_rounds=1) == 4
     finally:
         worker.stop()
 
     assert [row["status"] for row in probe.all("SELECT status FROM jobs ORDER BY job_id")] == [
+        "completed",
+        "completed",
         "completed",
         "completed",
     ]
@@ -471,7 +475,7 @@ def test_two_batches_are_consumed_serially(tmp_path: Path) -> None:
         probe.all(
             "SELECT worker_slot FROM jobs WHERE run_id IN (?, ?)", (first.run_id, second.run_id)
         )
-    ) == 2
+    ) == 4  # 每个批次两条：判别 + 自动导出
 
 
 def test_input_invalid_rows_are_never_sent_to_the_model(tmp_path: Path) -> None:
