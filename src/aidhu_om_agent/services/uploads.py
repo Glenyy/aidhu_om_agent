@@ -1,11 +1,15 @@
-"""S03-07：上传文件与预检结果的**内存态**暂存。
+"""上传与预检的持久化登记（S04-02）。
 
-**临时实现**：S03 没有数据库（S04 才做），上传登记与预检快照只保存在 API 进程
-内存中，进程重启后 `upload_id`/`validation_id` 全部失效。字段与
-[plan/08 §3](../../../plan/08-API接口与数据合同.md) 对齐，S04 换成持久化存储时
-接口不变。
+S03-07 的内存实现在本阶段换成 SQLite：`uploads`／`input_validations` 各占一行，
+**进程重启后 upload_id / validation_id 仍然有效**；HTTP 接口形状不变
+（[plan/08 §3](../../../plan/08-API接口与数据合同.md)）。
 
 原始文件只读保存：服务端生成文件名，原文件名仅作元信息；**不修改原文件内容**。
+文件**先完整写入再登记**；登记失败时删除刚写入的文件，不留孤儿。
+
+预检快照保存的是**报告**（`PrecheckReport`），不重复保存记录行：记录属于批次
+（plan/09 §3）。需要完整 `ParsedInput` 时由 `services.batches.load_parsed_input()`
+用**未变的原文件**重算并与快照核对，见该函数的说明。
 """
 
 from __future__ import annotations
@@ -16,8 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from ..excel.reader import file_digest
-from ..schemas.qa import ParsedInput
+from ..excel.reader import file_digest, sheet_catalog
+from ..repositories import runs as runs_repo
+from ..schemas.qa import ParsedInput, PrecheckReport
+from ..storage import Database, utc_now, write_transaction
 
 
 class UploadTooLargeError(Exception):
@@ -33,6 +39,7 @@ class UploadedFile:
     original_filename: str
     size_bytes: int
     sha256: str
+    sheets: tuple[tuple[str, bool], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -41,16 +48,20 @@ class ValidationRecord:
 
     validation_id: str
     upload_id: str
-    parsed: ParsedInput
+    report: PrecheckReport
+
+    @property
+    def status(self) -> str:
+        return self.report.status
 
 
 class UploadStore:
-    """上传与预检的内存登记表；文件本体写在 ``uploads_dir``。"""
+    """上传与预检的持久化登记；文件本体写在 ``uploads_dir``。"""
 
-    def __init__(self, uploads_dir: Path) -> None:
-        self._dir = uploads_dir
-        self._uploads: dict[str, UploadedFile] = {}
-        self._validations: dict[str, ValidationRecord] = {}
+    def __init__(self, database: Database, uploads_dir: Path) -> None:
+        self._db = database
+        self._dir = Path(uploads_dir)
+        # 同进程内的并发上传仍需串行化文件名与登记；跨进程由数据库约束保证。
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ 上传
@@ -84,36 +95,96 @@ class UploadStore:
             target.unlink(missing_ok=True)
             raise
 
+        digest = file_digest(target)
+        sheets = tuple(sheet_catalog(target))
+
         record = UploadedFile(
             upload_id=upload_id,
             path=target,
             original_filename=original_filename,
             size_bytes=size_bytes,
-            sha256=file_digest(target),
+            sha256=digest,
+            sheets=sheets,
         )
-        with self._lock:
-            self._uploads[upload_id] = record
+        try:
+            with self._lock:
+                connection = self._db.connect()
+                try:
+                    with write_transaction(connection) as conn:
+                        runs_repo.insert_upload(
+                            conn,
+                            upload_id=upload_id,
+                            original_filename=original_filename,
+                            relative_path=target.name,
+                            sha256=digest,
+                            size_bytes=size_bytes,
+                            sheets=sheets,
+                            created_at=utc_now(),
+                        )
+                finally:
+                    connection.close()
+        except BaseException:
+            # 登记失败不留孤儿文件：下次上传会生成新的 upload_id。
+            target.unlink(missing_ok=True)
+            raise
         return record
 
     def get_upload(self, upload_id: str) -> UploadedFile | None:
-        with self._lock:
-            return self._uploads.get(upload_id)
+        connection = self._db.connect()
+        try:
+            row = runs_repo.get_upload(connection, upload_id)
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        path = row.path(self._dir)
+        if not path.is_file():
+            return None
+        return UploadedFile(
+            upload_id=row.upload_id,
+            path=path,
+            original_filename=row.original_filename,
+            size_bytes=row.size_bytes,
+            sha256=row.sha256,
+            sheets=row.sheets,
+        )
 
     # ------------------------------------------------------------------ 预检
 
     def put_validation(self, upload_id: str, parsed: ParsedInput) -> ValidationRecord:
-        record = ValidationRecord(
-            validation_id=uuid.uuid4().hex,
-            upload_id=upload_id,
-            parsed=parsed,
-        )
+        """保存一次预检报告；**不覆盖**同一上传的历史预检。"""
+        validation_id = uuid.uuid4().hex
         with self._lock:
-            self._validations[record.validation_id] = record
-        return record
+            connection = self._db.connect()
+            try:
+                with write_transaction(connection) as conn:
+                    runs_repo.insert_input_validation(
+                        conn,
+                        validation_id=validation_id,
+                        upload_id=upload_id,
+                        report=parsed.report,
+                        created_at=utc_now(),
+                    )
+            finally:
+                connection.close()
+        return ValidationRecord(
+            validation_id=validation_id, upload_id=upload_id, report=parsed.report
+        )
 
     def get_validation(self, validation_id: str) -> ValidationRecord | None:
-        with self._lock:
-            return self._validations.get(validation_id)
+        """读取预检报告；**不含记录行**（记录属于批次）。"""
+        connection = self._db.connect()
+        try:
+            row = runs_repo.get_input_validation(connection, validation_id)
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        return ValidationRecord(
+            validation_id=row.validation_id,
+            upload_id=row.upload_id,
+            report=row.report,
+        )
 
 
 __all__ = [

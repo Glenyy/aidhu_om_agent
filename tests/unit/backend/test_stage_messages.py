@@ -6,6 +6,8 @@ ref** 与完整阶段一结果。这里只检查纯函数构造的消息，不�
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from aidhu_om_agent.agent.stage1 import (
@@ -70,7 +72,9 @@ def test_stage1_has_two_roles_and_uses_prompt() -> None:
 
     assert [message["role"] for message in messages] == ["system", "user"]
     assert messages[0]["content"]
-    assert STAGE1_PROMPT_VERSION == "1.1"
+    # 只核形态：具体版本号由 `test_prompt_versions_are_bumped_but_schemas_are_unchanged`
+    # 一处钉住，避免每次改提示词都要在多个地方同步一个数字。
+    assert re.fullmatch(r"\d+\.\d+", STAGE1_PROMPT_VERSION)
 
 
 def test_stage1_carries_question_and_all_refs() -> None:
@@ -159,7 +163,7 @@ def test_stage2_uses_its_own_prompt() -> None:
     messages = build_stage2_messages(make_record(), stage1_result())
 
     assert messages[0]["role"] == "system"
-    assert STAGE2_PROMPT_VERSION == "1.1"
+    assert re.fullmatch(r"\d+\.\d+", STAGE2_PROMPT_VERSION)
     assert messages[0]["content"] != build_stage1_messages(make_record())[0]["content"]
 
 
@@ -209,3 +213,56 @@ def test_prompt_tells_the_model_how_to_pick_a_quote(builder: str) -> None:
     assert "**" in prompt
     assert "空行" in prompt
     assert "省略号" in prompt
+
+# ---------------------------- S04-08：区分「逐字」与 JSON 字符串内的换行转义
+
+
+def _prompt_of(builder: str) -> str:
+    messages = (
+        build_stage1_messages(make_record())
+        if builder == "stage1"
+        else build_stage2_messages(make_record(), stage1_result())
+    )
+    return _system_prompt(messages)
+
+
+@pytest.mark.parametrize("builder", ["stage1", "stage2"])
+def test_prompt_separates_verbatim_from_json_newline_escaping(builder: str) -> None:
+    """「逐字」说的是 JSON 解析之后的文本；字符串里换行必须写成 ``\\n``。
+
+    S03 遗留的失败族里，一种机制就是这两件事被混为一谈：模型一边被告知
+    「原样保留换行」，一边必须在 JSON 字符串里写 ``\\n``——不点破它就会二选一
+    错一个（写进真换行则 JSON 解析失败，删掉换行则摘录对不上原文）。
+    """
+    prompt = _prompt_of(builder)
+
+    assert "\\n" in prompt  # 明确给出了转义写法
+    assert "反斜杠" in prompt
+    assert "解析之后" in prompt  # 逐字的判定时点
+    assert "真正的换行" in prompt
+
+
+@pytest.mark.parametrize("builder", ["stage1", "stage2"])
+def test_prompt_forbids_rewriting_list_markers(builder: str) -> None:
+    """列表符号属于原文：换符号、补删符号同样是改写，不是「排版整理」。"""
+    prompt = _prompt_of(builder)
+
+    assert "列表符号" in prompt
+    assert "照抄" in prompt
+
+
+@pytest.mark.parametrize("builder", ["stage1", "stage2"])
+def test_prompt_forbids_joining_lines_to_dodge_the_escape(builder: str) -> None:
+    """反向的偷懒也要堵住：为了避开换行把跨行原文接成一行，同样对不上原文。"""
+    prompt = _prompt_of(builder)
+
+    assert "接成一行" in prompt
+
+
+def test_prompt_versions_are_bumped_but_schemas_are_unchanged() -> None:
+    """S04-08 只改提示词：提示词版本递增，**输出契约（schema）不变**。"""
+    from aidhu_om_agent.schemas.analysis import STAGE1_SCHEMA_VERSION
+    from aidhu_om_agent.schemas.judgement import STAGE2_SCHEMA_VERSION
+
+    assert STAGE1_PROMPT_VERSION == "1.2" and STAGE2_PROMPT_VERSION == "1.2"
+    assert STAGE1_SCHEMA_VERSION == "1.1" and STAGE2_SCHEMA_VERSION == "1.1"

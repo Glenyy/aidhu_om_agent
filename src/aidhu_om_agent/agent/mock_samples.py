@@ -16,8 +16,9 @@
 from __future__ import annotations
 
 import json
+import time
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from ..llm.client import STAGE1, STAGE2, ModelResponse
@@ -39,6 +40,16 @@ SCENARIO_FORCED_FAILURE = "forced_failure"
 
 #: 显式编号 → 情境的强制映射。用于让失败界面在**模拟模式**下零成本可验。
 FORCED_SCENARIOS: dict[str, str] = {"FF-1": SCENARIO_FORCED_FAILURE}
+
+#: 显式编号 → 每次调用的固定等待（毫秒）。S04-07 用它把整批耗时拉长到数秒，让用户
+#: **真的能在运行中停掉 worker** 制造中断——现有 `MockClient` 是零延迟，没有这个
+#: 窗口就只能对着已经跑完的批次谈恢复（S04 阶段文档 §0.4「慢速样例是必要条件」）。
+#: **不新增配置项**：等待由记录编号决定，只在模拟模式生效。
+SLOW_RECORD_DELAYS_MS: dict[str, int] = {
+    "SLOW-1": 1000,
+    "SLOW-2": 1000,
+    "SLOW-3": 1000,
+}
 
 #: 模拟模式接受的全部情境（五类常规 + 一类强制技术失败）。
 ALL_SCENARIOS: tuple[str, ...] = (*SCENARIOS, SCENARIO_FORCED_FAILURE)
@@ -218,15 +229,27 @@ class MockClient:
 
     每次 ``call`` 都记录收到的消息（``self.calls``），使自动化审阅能核对
     阶段一请求不含 ``a``、阶段二含全部原始 ref。
+
+    ``delay_ms`` 由记录编号决定（`SLOW_RECORD_DELAYS_MS`）：默认 0，只有慢速样例
+    的记录会真的等待，用于制造可被中断的整批窗口。``latency_ms`` 如实返回这段等待，
+    因此尝试表里的耗时不与真实经历的时间矛盾。
     """
 
-    def __init__(self, record: QARecord, scenario: str | None = None) -> None:
+    def __init__(
+        self,
+        record: QARecord,
+        scenario: str | None = None,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.record = record
         self.scenario = scenario or scenario_for(record)
         if self.scenario not in ALL_SCENARIOS:
             raise ValueError(
                 f"未知模拟情境 {self.scenario!r}；只接受 {'、'.join(ALL_SCENARIOS)}"
             )
+        self.delay_ms = int(SLOW_RECORD_DELAYS_MS.get(record.record_id or "", 0))
+        self._sleep = sleep
         self.calls: list[tuple[str, list[dict[str, str]]]] = []
 
     def call(
@@ -240,11 +263,14 @@ class MockClient:
         else:
             raise ValueError(f"未知阶段 {stage!r}")
 
+        if self.delay_ms:
+            self._sleep(self.delay_ms / 1000)
+
         return ModelResponse(
             content=json.dumps(payload, ensure_ascii=False),
             model="mock-deterministic",
             usage=None,  # 模拟不产生真实用量，不用 0 冒充
-            latency_ms=0,
+            latency_ms=self.delay_ms,
             finish_reason="stop",
             simulated=True,
         )
@@ -263,6 +289,7 @@ __all__ = [
     "SCENARIOS",
     "SCENARIO_FORCED_FAILURE",
     "SCENARIO_LABELS",
+    "SLOW_RECORD_DELAYS_MS",
     "MockClient",
     "scenario_for",
 ]

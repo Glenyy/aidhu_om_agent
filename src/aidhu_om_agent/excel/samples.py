@@ -5,8 +5,10 @@
 界面里上传。全部为合成数据，不含任何真实问答，零合规风险。
 
 样例覆盖手动验证需要的核心流程与边界：正常记录、五类模拟情境、资料全空、
-单条输入失败、批次阻断、S03-06 真实调用用的最长样例，以及 2026-10-06 返工新增的
-**技术失败**样例（模拟模式下复现“输出被拒”的界面）。
+单条输入失败、批次阻断、S03-06 真实调用用的最长样例、2026-10-06 返工新增的
+**技术失败**样例（模拟模式下复现“输出被拒”的界面），以及 S04-07 为批次界面新增的
+**部分失败批次**（1 条确定性技术失败 + 2 条正常）与**慢速批次**（整批约 6 秒，
+供用户在运行中停掉 worker 制造真实中断）。
 """
 
 from __future__ import annotations
@@ -16,12 +18,16 @@ from io import BytesIO
 
 from openpyxl import Workbook
 
-from ..agent.mock_samples import FORCED_SCENARIOS
+from ..agent.mock_samples import FORCED_SCENARIOS, SLOW_RECORD_DELAYS_MS
 from ..schemas.qa import A_COLUMN, ID_COLUMN, INPUT_COLUMNS, Q_COLUMN, REF_FIELDS
 from .reader import PREFERRED_SHEET
 
 #: 强制技术失败样例的记录编号；取自模拟情境的显式映射，避免两处写死而漂移。
 FORCED_FAILURE_RECORD_ID = next(iter(FORCED_SCENARIOS))
+
+#: 慢速样例的记录编号；同样取自延迟映射本身（写死编号会让「样例不再慢」这种
+#: 漂移变得不可见：改动映射后样例照样能下载，只是不再制造中断窗口）。
+SLOW_RECORD_IDS: tuple[str, ...] = tuple(SLOW_RECORD_DELAYS_MS)
 
 
 @dataclass(frozen=True)
@@ -174,6 +180,51 @@ SAMPLES: tuple[SampleDefinition, ...] = (
         rows=_longest_rows(),
     ),
     SampleDefinition(
+        name="mixed-outcome",
+        filename="synthetic-mixed-outcome.xlsx",
+        description=(
+            "3 条有效记录：编号 FF-1 在模拟模式下确定性技术失败，另 2 条正常判定；"
+            "用于验证 partial_failed 批次、失败摘要与「重试失败项」（重试≠必成功）"
+        ),
+        rows=(
+            _qa_row(
+                FORCED_FAILURE_RECORD_ID,
+                "校园网密码怎么重置？",
+                "在自助服务里重置。",
+                ("校园网密码可在自助服务终端重置，需刷校园卡并输入原密码。",),
+            ),
+            _qa_row(
+                "M-1",
+                "如何办理校园卡？",
+                "带身份证到校园卡中心办理。",
+                ("校园卡首次办理需携带身份证到校园卡中心办理，工本费 20 元。",),
+            ),
+            _qa_row(
+                "M-2",
+                "图书馆开放到几点？",
+                "晚上 22:00 关门。",
+                ("图书馆开放时间为每日 8:00—21:30，周一上午闭馆整理。",),
+            ),
+        ),
+    ),
+    SampleDefinition(
+        name="slow-batch",
+        filename="synthetic-slow-batch.xlsx",
+        description=(
+            "3 条有效记录，编号取自慢速映射：模拟模式下每次调用各等待约 1 秒，"
+            "整批约 6 秒；用于在运行中停掉 worker 制造真实中断"
+        ),
+        rows=tuple(
+            _qa_row(
+                record_id,
+                f"第 {index} 条：如何办理校园卡？",
+                "带身份证到校园卡中心办理。",
+                ("校园卡首次办理需携带身份证到校园卡中心办理，工本费 20 元。",),
+            )
+            for index, record_id in enumerate(SLOW_RECORD_IDS, start=1)
+        ),
+    ),
+    SampleDefinition(
         name="forced-failure",
         filename="synthetic-forced-failure.xlsx",
         description="1 条编号 FF-1 的记录：模拟模式下刻意让阶段二输出被校验拒绝，用于验证技术失败界面（不产生标签）",
@@ -217,6 +268,7 @@ def build_workbook_bytes(sample: SampleDefinition) -> bytes:
 __all__ = [
     "FORCED_FAILURE_RECORD_ID",
     "SAMPLES",
+    "SLOW_RECORD_IDS",
     "SampleDefinition",
     "build_workbook_bytes",
     "get_sample",

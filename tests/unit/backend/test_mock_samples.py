@@ -15,6 +15,7 @@ from aidhu_om_agent.agent.mock_samples import (
     SCENARIOS,
     SCENARIO_FORCED_FAILURE,
     SCENARIO_LABELS,
+    SLOW_RECORD_DELAYS_MS,
     MockClient,
     scenario_for,
 )
@@ -107,6 +108,33 @@ def test_mock_response_is_marked_simulated() -> None:
 def test_unknown_stage_is_rejected() -> None:
     with pytest.raises(ValueError, match="未知阶段"):
         MockClient(make_record()).call([], "stage3")
+
+
+# --------------------------------------------------- S04-07：慢速样例的等待
+
+
+def test_normal_record_does_not_wait() -> None:
+    """除慢速样例的编号之外，模拟调用保持零等待（默认行为不变）。"""
+    slept: list[float] = []
+    response = MockClient(make_record(), sleep=slept.append).call([], STAGE1)
+
+    assert slept == []
+    assert response.latency_ms == 0
+
+
+def test_slow_record_waits_and_reports_the_wait() -> None:
+    """慢速编号真的等待，且 ``latency_ms`` 如实返回这段等待（不报 0 掩盖）。"""
+    record_id = next(iter(SLOW_RECORD_DELAYS_MS))
+    expected_ms = SLOW_RECORD_DELAYS_MS[record_id]
+    slept: list[float] = []
+    client = MockClient(make_record(record_id=record_id), sleep=slept.append)
+
+    response = client.call([], STAGE1)
+
+    assert slept == [expected_ms / 1000]
+    assert response.latency_ms == expected_ms
+    # 等待只影响耗时，不影响结果：同一情境仍是确定性输出。
+    assert response.simulated is True
 
 
 # ---------------------------------------------------------------- 通过真实校验

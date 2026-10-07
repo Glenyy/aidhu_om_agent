@@ -16,7 +16,8 @@ from ..schemas.analysis import Stage1Analysis
 from ..schemas.qa import QARecord
 
 #: 与 `schemas/judgement.py::STAGE2_SCHEMA_VERSION` 对应；提示词改动须递增。
-STAGE2_PROMPT_VERSION = "1.1"
+#: 1.2（S04-08）：显式区分「逐字」与 JSON 内换行须写 ``\n``，并禁止改写列表符号。
+STAGE2_PROMPT_VERSION = "1.2"
 
 _EMPTY_REF = "（本份资料为空）"
 
@@ -36,11 +37,14 @@ def _stage1_block(stage1: Stage1Analysis) -> str:
 
 
 def build_stage2_messages(
-    record: QARecord, stage1: Stage1Analysis
+    record: QARecord, stage1: Stage1Analysis, *, prompt: str | None = None
 ) -> list[dict[str, str]]:
     """构造阶段二消息：system 为提示词，user 为 q、a、全部 ref 与阶段一结果。
 
     有效记录的 ``q``/``a`` 必非空；缺失时抛 ``ValueError``，不做静默填充。
+
+    ``prompt`` 用于传**批次冻结的提示词快照**（S04：恢复与执行都必须用快照而不是
+    当前磁盘内容）；为 ``None`` 时读磁盘上的当前版本。
     """
     if record.q is None:
         raise ValueError(f"来源行 {record.source_row} 缺少 q，不能进入阶段二")
@@ -60,7 +64,10 @@ def build_stage2_messages(
         )
     )
     return [
-        {"role": "system", "content": load_prompt("stage2")},
+        {
+            "role": "system",
+            "content": load_prompt("stage2") if prompt is None else prompt,
+        },
         {"role": "user", "content": user_content},
     ]
 

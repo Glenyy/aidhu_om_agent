@@ -8,12 +8,15 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 
 import {
   ApiError,
+  createRun,
   fetchJob,
   fetchSamples,
   judgeRecord,
+  newIdempotencyKey,
   sampleDownloadUrl,
   uploadWorkbook,
   validateUpload,
@@ -31,6 +34,7 @@ const TERMINAL_STATUS = new Set(['completed', 'partial_failed', 'failed']);
 const POLL_INTERVAL_MS = 2000;
 const TICK_INTERVAL_MS = 1000;
 
+const router = useRouter();
 const mode = ref<JudgeMode>('mock');
 const upload = ref<UploadData | null>(null);
 const selectedSheet = ref<string | null>(null);
@@ -41,6 +45,7 @@ const hint = ref<{ kind: 'error' | 'info'; text: string } | null>(null);
 const uploading = ref(false);
 const validating = ref(false);
 const submitting = ref(false);
+const startingBatch = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
 const samples = ref<SampleInfo[]>([]);
 const selectedSample = ref<string>('');
@@ -81,6 +86,8 @@ const precheckPassed = computed(() => validation.value?.status === 'passed');
 const canJudge = computed(
   () => precheckPassed.value && selectedRecordKey.value !== null && !submitting.value && !running.value,
 );
+/** 整批判别：预检通过即可，与单条判别互不影响（整批走批次接口与 worker）。 */
+const canStartBatch = computed(() => precheckPassed.value && !startingBatch.value);
 const currentSample = computed(
   () => samples.value.find((sample) => sample.name === selectedSample.value) ?? null,
 );
@@ -252,6 +259,33 @@ async function runJudge(): Promise<void> {
   }
 }
 
+/**
+ * 开始整批判别：从这次预检创建一个批次并跳到批次详情。
+ *
+ * 创建是写操作、且会产生模型调用，因此带 `Idempotency-Key`（plan/08 §4）。请求
+ * 失败时**不重试**：界面把错误如实显示，用户再点一次会生成新键——这是有意的新动作，
+ * 而不是「不确定结果」的重复提交。
+ */
+async function startBatch(): Promise<void> {
+  if (!validation.value) return;
+  hint.value = null;
+  startingBatch.value = true;
+  try {
+    const created = await createRun(validation.value.validation_id, newIdempotencyKey());
+    ElMessage.success(
+      created.reused
+        ? `该请求此前已提交，沿用批次 ${created.run_id}`
+        : `已创建批次 ${created.run_id}，判别任务 ${created.job_id} 已入队`,
+    );
+    // 批次只入队；实际执行由 worker 完成，因此跳到详情页看进度。
+    await router.push(`/runs/${created.run_id}`);
+  } catch (error) {
+    fail(error);
+  } finally {
+    startingBatch.value = false;
+  }
+}
+
 function sufficiencyText(value: string): string {
   if (value === 'sufficient') return '资料充分';
   if (value === 'insufficient') return '资料不足';
@@ -415,6 +449,27 @@ function stageText(stage: string | null, status: JobStatus): string {
           <el-table-column prop="record_id" label="编号" width="140" />
           <el-table-column prop="reason" label="原因" />
         </el-table>
+      </div>
+
+      <div v-if="precheckPassed" class="sub-block batch-block">
+        <h4>开始整批判别（S04）</h4>
+        <el-button
+          type="primary"
+          :disabled="!canStartBatch"
+          :loading="startingBatch"
+          @click="startBatch"
+        >
+          开始判别（整批）
+        </el-button>
+        <span class="muted">
+          为本次预检创建一个批次（共 {{ validation.counts.total ?? 0 }} 条记录，含输入失败的
+          {{ validation.counts.input_invalid ?? 0 }} 条）。创建只<strong>入队</strong>，不会立即调用模型：
+          需要有一个运行中的 worker 才会真正执行。
+        </span>
+        <p class="muted batch-note">
+          批次模式由 worker 决定（模拟或真实），不在本页切换；整批进度、恢复与调用统计在
+          「批次」页查看。
+        </p>
       </div>
 
       <div v-if="validation.warnings.length" class="sub-block">
@@ -652,6 +707,15 @@ function stageText(stage: string | null, status: JobStatus): string {
 }
 
 .sample-note {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+}
+
+.batch-block :deep(.el-button) {
+  margin-right: 0.5rem;
+}
+
+.batch-note {
   margin: 0.5rem 0 0;
   font-size: 0.85rem;
 }

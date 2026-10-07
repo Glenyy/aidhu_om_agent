@@ -7,6 +7,10 @@ import type {
   JobPayload,
   JudgeCreated,
   JudgeMode,
+  ResumeResult,
+  RunCreated,
+  RunDetail,
+  RunListPage,
   SampleInfo,
   UploadData,
   ValidationData,
@@ -111,4 +115,59 @@ export function fetchSamples(): Promise<SampleInfo[]> {
  */
 export function sampleDownloadUrl(name: string): string {
   return `/api/samples/${encodeURIComponent(name)}`;
+}
+
+// ------------------------------------------------- S04-07：批次列表、详情与恢复
+
+/**
+ * 生成一次用户动作的幂等键（plan/08 §4）。
+ *
+ * 后端按「方法 + 路径 + key」去重，所以创建与恢复各自保留一个键：网络结果不确定
+ * 时用**同一个键**重试，避免同一批次排进两个判别任务。`crypto.randomUUID` 在
+ * 本机页面（含 http://127.0.0.1）是安全上下文，可直接使用。
+ */
+export function newIdempotencyKey(): string {
+  return crypto.randomUUID().replace(/-/g, '');
+}
+
+/** 创建批次：从一次 passed 预检开始整批判别。 */
+export function createRun(validationId: string, idempotencyKey: string): Promise<RunCreated> {
+  return unwrap<RunCreated>(
+    http.post<SuccessEnvelope<RunCreated>>(
+      '/runs',
+      { validation_id: validationId },
+      { headers: { 'Idempotency-Key': idempotencyKey } },
+    ),
+  );
+}
+
+/** 批次列表；无筛选条件时默认第 1 页、每页 50 条。 */
+export function fetchRuns(page = 1, pageSize = 50): Promise<RunListPage> {
+  return unwrap<RunListPage>(
+    http.get<SuccessEnvelope<RunListPage>>('/runs', {
+      params: { page, page_size: pageSize },
+    }),
+  );
+}
+
+export function fetchRun(runId: string): Promise<RunDetail> {
+  return unwrap<RunDetail>(http.get<SuccessEnvelope<RunDetail>>(`/runs/${runId}`));
+}
+
+/**
+ * 恢复批次：`retryFailed=false` 只继续还有剩余预算的阶段，`true` 同时重开失败项的
+ * 预算轮次。响应只表示**已入队**，实际执行由 worker 完成。
+ */
+export function resumeRun(
+  runId: string,
+  retryFailed: boolean,
+  idempotencyKey: string,
+): Promise<ResumeResult> {
+  return unwrap<ResumeResult>(
+    http.post<SuccessEnvelope<ResumeResult>>(
+      `/runs/${runId}/resume`,
+      { retry_failed: retryFailed },
+      { headers: { 'Idempotency-Key': idempotencyKey } },
+    ),
+  );
 }

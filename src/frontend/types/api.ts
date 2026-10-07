@@ -3,7 +3,15 @@
 
 export type JudgeMode = 'mock' | 'real';
 export type PrecheckStatus = 'passed' | 'blocked';
-export type JobStatus = 'queued' | 'running' | 'completed' | 'partial_failed' | 'failed';
+// 任务与批次共用同一套状态（plan/10 §2）；`interrupted` 只在进程被停掉后由新 worker
+// 的启动恢复写入，`/api/judge` 的临时内存任务不会产生它。
+export type JobStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'partial_failed'
+  | 'failed'
+  | 'interrupted';
 
 export interface SheetInfo {
   name: string;
@@ -151,6 +159,154 @@ export interface JudgeCreated {
   job_id: string;
   mode: JudgeMode;
   status: JobStatus;
+}
+
+// ------------------------------------------------- S04-07：批次列表与详情
+
+/** 批次详情计数；口径见 plan/08 §5，`review_required` 是 `classified` 的子集。 */
+export interface RunCounts {
+  total: number;
+  valid: number;
+  input_invalid: number;
+  classified: number;
+  failed: number;
+  remaining: number;
+  processed: number;
+  review_required: number;
+}
+
+/** 列表项：批次标识、来源文件名、状态、计数、创建时间。 */
+export interface RunListItem {
+  run_id: string;
+  original_filename: string;
+  sheet_name: string;
+  status: JobStatus;
+  revision: number;
+  counts: RunCounts;
+  progress_percent: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface RunListPage {
+  items: RunListItem[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+/** 任务摘要；不含 payload（里面是整批记录键）。 */
+export interface RunJobSummary {
+  job_id: string;
+  kind: string;
+  mode: string;
+  status: JobStatus;
+  current_record_key: string | null;
+  current_stage: string | null;
+  worker_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  last_activity_at: string | null;
+  finished_at: string | null;
+  error: { code: string; message: string } | null;
+  result: { counts?: Record<string, number>; attempted?: number } | null;
+}
+
+/** 模型消费闸门与最近一次 worker 归属；**不据时间戳判定进程是否存活**。 */
+export interface RunExecutionControl {
+  model_dispatch_paused: boolean;
+  pause_reason: { code?: string; message?: string; job_id?: string } | null;
+  last_worker: { worker_id: string; started_at: string | null; mode: string | null } | null;
+  runtime_updated_at: string | null;
+}
+
+/** `allowed_actions`：按钮的可用性与原因由后端给出，前端不自行判断。 */
+export interface RunAllowedActions {
+  can_resume: boolean;
+  can_retry_failed: boolean;
+  finalization_required: boolean;
+  selected_records: number;
+  renewed_campaigns: number;
+  skipped_budget_exhausted: number;
+  skipped_needs_new_batch: number;
+  retry_failed_selected?: number;
+  retry_failed_renewed?: number;
+  remaining_rows?: number;
+  disabled_reason: string | null;
+  model_dispatch_paused: boolean;
+}
+
+/** 失败记录摘要：编号 + 失败阶段 + 错误码；**不含证据正文**。 */
+export interface RunFailureItem {
+  record_key: string;
+  record_id: string | null;
+  source_row: number;
+  order_index: number;
+  failure_stage: string | null;
+  code: string | null;
+  message: string | null;
+  retryable: boolean | null;
+  attempt_count: number | null;
+}
+
+export interface RunFailureSummary {
+  count: number;
+  items: RunFailureItem[];
+  truncated: boolean;
+}
+
+/** 按阶段统计尝试；用于核对恢复没有重复调用阶段一。 */
+export interface StageAttemptStat {
+  attempts: number;
+  succeeded: number;
+  failed: number;
+  unknown_after_interrupt: number;
+  simulated: number;
+}
+
+export interface RunDetail {
+  run_id: string;
+  original_filename: string;
+  sheet_name: string;
+  status: JobStatus;
+  revision: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  counts: RunCounts;
+  progress_percent: number;
+  active_job: RunJobSummary | null;
+  recent_jobs: RunJobSummary[];
+  execution_control: RunExecutionControl;
+  model_config: Record<string, unknown>;
+  versions: Record<string, unknown>;
+  last_error: { code?: string; message?: string; failed_count?: number } | null;
+  allowed_actions: RunAllowedActions;
+  failure_summary: RunFailureSummary;
+  call_statistics: { stage1: StageAttemptStat; stage2: StageAttemptStat };
+  /** S05 才产生导出文件；S04 固定为 null，界面据此显示「尚无导出」。 */
+  latest_export: null;
+}
+
+/** POST /api/runs 的返回：批次已排队，进度需轮询 GET /api/runs/{run_id}。 */
+export interface RunCreated {
+  run_id: string;
+  job_id: string;
+  reused: boolean;
+}
+
+/** POST /api/runs/{run_id}/resume 的返回：只表示**已入队**。 */
+export interface ResumeResult {
+  run_id: string;
+  job_id: string;
+  selected_records: number;
+  renewed_campaigns: number;
+  skipped_budget_exhausted: number;
+  skipped_needs_new_batch: number;
+  finalize_only: boolean;
+  dispatch_paused: boolean;
+  reused: boolean;
 }
 
 export interface JobPayload {

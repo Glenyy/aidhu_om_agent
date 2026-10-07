@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -26,8 +27,9 @@ from typing import Any, Literal, Protocol
 from ..config import ExecutionConfig
 from ..llm.client import STAGE1, STAGE2, ModelClient, ModelResponse, ModelUsage
 from ..llm.errors import ModelCallError
-from ..schemas.analysis import Stage1Analysis
-from ..schemas.judgement import Stage2Judgement
+from ..schemas.analysis import STAGE1_SCHEMA_VERSION
+from ..schemas.analysis import STAGE1_SCHEMA_VERSION, Stage1Analysis
+from ..schemas.judgement import STAGE2_SCHEMA_VERSION, Stage2Judgement
 from ..schemas.qa import QARecord
 from .stage1 import build_stage1_messages
 from .stage2 import build_stage2_messages
@@ -119,8 +121,48 @@ class BudgetLedger(Protocol):
     def record_attempt(self, record_key: str, stage: str) -> int:
         """调用模型**之前**登记一次尝试占位，返回登记后的已用次数。"""
 
+    def complete_attempt(
+        self, record_key: str, stage: str, attempt_no: int, completion: "AttemptCompletion"
+    ) -> None:
+        """一次尝试结束后回报结果；成功时会连同阶段结果一并提交。
+
+        **持久化实现在这里开短事务**：写入 attempt 终态、`stage_results`、记录
+        状态/投影与 `runs.revision`（[plan/09 §…“保存阶段”]）。内存实现为空操作。
+        实现抛出的存储异常直接向上传播，由调用方决定任务级别处理。
+        """
+
     def reset(self, record_key: str, stage: str) -> None:
         """显式重开一轮预算时清零；普通恢复不调用本方法。"""
+
+
+@dataclass(frozen=True)
+class AttemptCompletion:
+    """一次尝试结束后的回报（S04-03）。
+
+    它同时承载两件事：**尝试的终态**（供 `call_attempts` 落库）与**成功时的阶段
+    结果**（供 `stage_results` 落库）。``result``/``result_json``/``schema_version``
+    只在 ``outcome == "ok"`` 时非空。
+
+    ``content`` 是模型返回的**最终正文**，已按 `RAW_OUTPUT_LIMIT` 截断；持久化实现
+    按 plan/09 §4 落 `call_attempts.final_content`，接口层仍只对失败尝试暴露它
+    （S03 返工 R-1 的口径不变）。
+    """
+
+    outcome: AttemptOutcome
+    model: str | None = None
+    usage: ModelUsage | None = None
+    latency_ms: int | None = None
+    simulated: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    content: str | None = None
+    content_truncated: bool = False
+    result: Any | None = None
+    result_json: str | None = None
+    schema_version: str | None = None
+    #: 阶段二成功时的记录投影；阶段一为 ``None``（那时还不允许有标签）。
+    final_label: str | None = None
+    review_required: bool | None = None
 
 
 class InMemoryBudgetLedger:
@@ -138,13 +180,27 @@ class InMemoryBudgetLedger:
         self._used[key] = used
         return used
 
+    def complete_attempt(
+        self, record_key: str, stage: str, attempt_no: int, completion: AttemptCompletion
+    ) -> None:
+        """内存账本不保存尝试明细；阶段结果只随 `RecordResult` 返回。"""
+
     def reset(self, record_key: str, stage: str) -> None:
         self._used.pop((record_key, stage), None)
 
 
 def record_key_of(record: QARecord) -> str:
-    """预算账本的键；编号缺失时用来源行，保证唯一定位一条记录。"""
+    """预算账本的键；编号缺失时用来源行，保证唯一定位一条记录。
+
+    **只用于 S03 的临时判一条入口**（记录还没落库，没有内部主键）。执行持久化批次
+    时必须改为传 `records.record_key`，见 `run_single(record_key=...)`。
+    """
     return record.record_id if record.record_id else f"row:{record.source_row}"
+
+
+def canonical_json(model: Any) -> str:
+    """阶段结果的规范化 JSON 文本；`stage_results.result_json` 与摘要都取它。"""
+    return json.dumps(model.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
 
 
 #: 按校验问题的 ``kind`` 追加的**可操作**纠错提示。
@@ -155,6 +211,9 @@ _FEEDBACK_HINTS: dict[str, str] = {
         "证据摘录必须是对应 ref 原文中**一段连续的文字**：回到原文原样复制，"
         "保留原有的空格、换行、标点、加粗符号与全角字符，不要“清理”或重排；"
         "不要抄写 [refN] 这类编号标记，不要加省略号或引号，不要拼接不相邻的内容。"
+        "「逐字」说的是 JSON 解析之后的文本：换行在 JSON 里要写成 \\n，"
+        "不要为了避开换行把跨行的原文接成一行、也不要删掉中间的换行；"
+        "原文的列表符号（-、*、1. 等）照抄，不要换符号或补删符号。"
         "摘录尽量短，并优先选不含加粗符号、不含空行、不以空格开头的一句话或半句；"
         "如果对不上，就换一段更短、更干净的原文。"
     ),
@@ -163,7 +222,14 @@ _FEEDBACK_HINTS: dict[str, str] = {
     KIND_REF_RANGE: "证据的 ref 编号只能用 ref1—ref10，请按输入中的实际编号填写。",
     KIND_LABEL_ENUM: "判断只能取三个既定标签之一，请照抄标签原文，不要改写或自造。",
     KIND_FIELD_SCHEMA: "请严格按要求的字段名与类型输出，不要增删字段或改变取值形式。",
-    KIND_OUTPUT_FORMAT: "请只输出一个完整的 JSON 对象，不要输出其它文字。",
+    # 输出的格式问题里最容易反复出现的是**换行没转义**：字符串里出现真正的换行
+    # 会让整个 JSON 无法解析（S03 遗留的「记录 4 失败族」机制之一），所以这一条
+    # 不只说「输出 JSON」，还点名这一条怎么改。
+    KIND_OUTPUT_FORMAT: (
+        "请只输出一个完整的 JSON 对象，不要输出其它文字、解释或多余代码块。"
+        "字符串里不能出现真正的换行：换行要写成 \\n（反斜杠 + n）；"
+        "字符串里的引号写成 \\\"。"
+    ),
     KIND_CONSISTENCY: "字段之间不能自相矛盾，请按规则修正后重新输出。",
 }
 
@@ -223,7 +289,11 @@ def _run_stage(
     attempts: list[StageAttempt],
     sleep: Callable[[float], None],
 ) -> tuple[Any | None, RecordFailure | None]:
-    """执行一个阶段的“调用 → 校验 → 有限重试”，返回结果或失败。"""
+    """执行一个阶段的“调用 → 校验 → 有限重试”，返回结果或失败。
+
+    每次尝试都在**调用前**占位、在**返回后**回报终态：占位先于调用写入，所以
+    「调用已发出但结果没记下」时预算仍然被占用（[plan/10 §5]）。
+    """
     max_attempts = execution.max_attempts_per_stage_campaign
     messages: list[dict[str, str]] = [dict(message) for message in base_messages]
 
@@ -250,6 +320,16 @@ def _run_stage(
                     error_code=exc.code,
                     error_message=str(exc),
                 )
+            )
+            ledger.complete_attempt(
+                record_key,
+                stage,
+                attempt_no,
+                AttemptCompletion(
+                    outcome="model_error",
+                    error_code=exc.code,
+                    error_message=str(exc),
+                ),
             )
             if exc.retryable and attempt_no < max_attempts:
                 sleep(_backoff_seconds(execution, attempt_no))
@@ -281,6 +361,22 @@ def _run_stage(
                     raw_output_truncated=raw_truncated,
                 )
             )
+            ledger.complete_attempt(
+                record_key,
+                stage,
+                attempt_no,
+                AttemptCompletion(
+                    outcome="validation_error",
+                    model=response.model,
+                    usage=response.usage,
+                    latency_ms=response.latency_ms,
+                    simulated=response.simulated,
+                    error_code=CODE_OUTPUT_INVALID,
+                    error_message=str(exc),
+                    content=raw_output,
+                    content_truncated=raw_truncated,
+                ),
+            )
             if attempt_no >= max_attempts:
                 return None, RecordFailure(
                     stage=stage,
@@ -303,6 +399,32 @@ def _run_stage(
                 simulated=response.simulated,
             )
         )
+        # 成功：持久化实现在**同一事务**里写 attempt 终态、stage_results、记录状态
+        # 与批次 revision；解析与证据校验已经在上面的 parse() 里完成，不在事务内。
+        content, content_truncated = _clip_raw_output(response.content)
+        ledger.complete_attempt(
+            record_key,
+            stage,
+            attempt_no,
+            AttemptCompletion(
+                outcome="ok",
+                model=response.model,
+                usage=response.usage,
+                latency_ms=response.latency_ms,
+                simulated=response.simulated,
+                content=content,
+                content_truncated=content_truncated,
+                result=parsed,
+                result_json=canonical_json(parsed),
+                schema_version=(
+                    STAGE1_SCHEMA_VERSION if stage == STAGE1 else STAGE2_SCHEMA_VERSION
+                ),
+                # 阶段一结果没有 label/review_required 字段，因此投影为 None；
+                # 三分类标签只在阶段二结果里出现。
+                final_label=getattr(getattr(parsed, "label", None), "value", None),
+                review_required=getattr(parsed, "review_required", None),
+            ),
+        )
         return parsed, None
 
 
@@ -312,36 +434,52 @@ def run_single(
     *,
     execution: ExecutionConfig,
     budget: BudgetLedger | None = None,
+    record_key: str | None = None,
+    prompts: Mapping[str, str] | None = None,
+    stage1: Stage1Analysis | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> RecordResult:
     """按固定两阶段流程判别一条记录。
 
     ``client`` 是协议：真实实现为 `llm.client.OpenAICompatibleClient`，模拟实现为
     `agent.mock_samples.MockClient`。``sleep`` 可注入，便于测试不实际等待退避。
+
+    ``record_key`` 是**持久化批次的内部主键**（`records.record_key`）；执行已落库的
+    记录时必须传它，否则会退回 S03 的临时键（编号或来源行）。``prompts`` 是批次
+    冻结的提示词快照（``{"stage1": 正文, "stage2": 正文}``），缺省时读磁盘当前版本。
+    ``stage1`` 非空表示阶段一**已提交**，直接从阶段二开始，不重跑阶段一也不占用
+    它的预算（恢复路径，[plan/10 §3]）。
     """
     ledger = budget if budget is not None else InMemoryBudgetLedger()
-    key = record_key_of(record)
+    key = record_key if record_key is not None else record_key_of(record)
     attempts: list[StageAttempt] = []
 
-    stage1, failure = _run_stage(
-        stage=STAGE1,
-        record_key=key,
-        base_messages=build_stage1_messages(record),
-        parse=lambda text: parse_stage1(text, record),
-        client=client,
-        execution=execution,
-        ledger=ledger,
-        attempts=attempts,
-        sleep=sleep,
-    )
-    if failure is not None:
-        return _failed(record, failure, attempts)
+    if stage1 is None:
+        stage1, failure = _run_stage(
+            stage=STAGE1,
+            record_key=key,
+            base_messages=build_stage1_messages(
+                record, prompt=None if prompts is None else prompts[STAGE1]
+            ),
+            parse=lambda text: parse_stage1(text, record),
+            client=client,
+            execution=execution,
+            ledger=ledger,
+            attempts=attempts,
+            sleep=sleep,
+        )
+        if failure is not None:
+            return _failed(record, failure, attempts)
 
     # 充分性为 insufficient/uncertain 时**仍然**进入阶段二。
     stage2, failure = _run_stage(
         stage=STAGE2,
         record_key=key,
-        base_messages=build_stage2_messages(record, stage1),
+        base_messages=build_stage2_messages(
+            record,
+            stage1,
+            prompt=None if prompts is None else prompts[STAGE2],
+        ),
         parse=lambda text: parse_stage2(text, record),
         client=client,
         execution=execution,
@@ -350,7 +488,9 @@ def run_single(
         sleep=sleep,
     )
     if failure is not None:
-        return _failed(record, failure, attempts)
+        # 阶段二失败**保留阶段一结果**（[plan/10 §3]）：调用方据此保持已提交的
+        # 阶段一检查点，不给标签。
+        return _failed(record, failure, attempts, stage1=stage1)
 
     return RecordResult(
         record_id=record.record_id,
@@ -365,13 +505,18 @@ def run_single(
 
 
 def _failed(
-    record: QARecord, failure: RecordFailure, attempts: list[StageAttempt]
+    record: QARecord,
+    failure: RecordFailure,
+    attempts: list[StageAttempt],
+    *,
+    stage1: Stage1Analysis | None = None,
 ) -> RecordResult:
+    """失败结果；**不填造标签**。阶段一已提交时保留其原结果。"""
     return RecordResult(
         record_id=record.record_id,
         source_row=record.source_row,
         status="failed",
-        stage1=None,
+        stage1=stage1,
         stage2=None,
         failure=failure,
         simulated=any(attempt.simulated for attempt in attempts),
@@ -436,12 +581,14 @@ __all__ = [
     "CODE_BUDGET_EXHAUSTED",
     "CODE_OUTPUT_INVALID",
     "RAW_OUTPUT_LIMIT",
+    "AttemptCompletion",
     "BudgetLedger",
     "InMemoryBudgetLedger",
     "RecordFailure",
     "RecordResult",
     "RecordStatus",
     "StageAttempt",
+    "canonical_json",
     "record_key_of",
     "result_to_payload",
     "run_single",

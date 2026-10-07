@@ -151,9 +151,11 @@ def test_forced_failure_produces_output_invalid_without_a_label(tmp_path: Path) 
 
     assert payload["status"] == PARTIAL_FAILED
     assert result["label"] is None
-    # 失败记录不返回阶段详情（S03 既有行为：不给标签、不半填结果），
-    # 但 attempts 里能看到阶段一确实通过了。
-    assert result["stage1"] is None and result["stage2"] is None
+    # 仍然不给标签：阶段二失败就没有最终判断。
+    assert result["stage2"] is None
+    # S04-03 起阶段一结果**保留**（plan/10 §3「stage1_done → 阶段二失败 → failed，
+    # 保留阶段一结果」）：阶段一确实通过并已提交，丢掉它会让恢复与核对都失去依据。
+    assert result["stage1"] is not None
     assert [(item["stage"], item["outcome"]) for item in result["attempts"]] == [
         (STAGE1, "ok"),
         (STAGE2, "validation_error"),

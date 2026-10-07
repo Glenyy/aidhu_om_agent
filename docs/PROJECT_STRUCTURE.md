@@ -1,6 +1,6 @@
 # 实际目录与生成清单
 
-更新日期：2026-10-06。基线：v2.3 规划；实施入口 v2.1，S01 阶段文档 v1.3，S02 阶段文档 v1.3，S03 阶段文档 v1.6，S06 阶段文档 v1.1，其余阶段 v1.0。状态：**S01、S02、S03 三个阶段均已实现、通过自动化审阅并经用户验收（阶段已接受）**——S02 与 S03 由用户在同一次界面操作中一并验收，S03 另有返工轮次（R-1—R-6）经 r02 自动化审阅与用户复验后接受；S04—S09 未开始、未批准（S04 的启动前置已满足，但仍须先讨论批准其小步骤）。
+更新日期：2026-10-07。基线：v2.3 规划；实施入口 v2.4，S01 阶段文档 v1.3，S02 阶段文档 v1.3，S03 阶段文档 v1.6，**S04 阶段文档 v2.3**，S06 阶段文档 v1.1，其余阶段 v1.0。状态：**S01、S02、S03、S04 四个阶段均已实现、通过自动化审阅并经用户验收（阶段已接受）**——S02 与 S03 由用户在同一次界面操作中一并验收，S03 另有返工轮次（R-1—R-6）经 r02 自动化审阅与用户复验后接受；**S04 的小步骤 S04-01—S04-08 已讨论定稿并获用户批准，已全部实现、自动化审阅通过，并于 2026-10-07 经用户界面验证接受**，S05—S09 未开始、未批准。
 
 初次骨架新增 50 个目录、94 个文件（含 23 个 .gitkeep）。2026-10-05 追加实施阶段、模板和规则；2026-10-06 追加交接检查、用户 Conda 依赖清单、AGENTS 入口及接手/环境规则；同日实现 S01（后端配置/日志、前端骨架、单测与构建产物、锁文件）、生成自动化与手动审阅文档、记录用户验收结论，并将项目纳入 Git；同日完成 S02 输入解析与预检实现、生成 S02 自动化与手动审阅文档；同日按用户要求把手动验证改为**只经前端界面**，相应更新审阅与阶段执行规则、调整 S03 范围（新增界面骨架与模拟模式）并同步各状态文档；同日实现 S03（模型适配、两阶段判别、提示词、重试与预算、模拟模式、界面骨架与样例下载接口），在批准预算内完成真实服务兼容实测（10 次调用），生成 S03 自动化审阅报告与**界面版**手动指南（一次操作一并验收 S02 与 S03）。原 plan 保持不变。
 
@@ -235,8 +235,8 @@ aidhu_om_agent/
 
 | 类别 | 状态 |
 | --- | --- |
-| README、AGENTS、CLAUDE、docs 导航 | 已同步 S01 验收结论、S02/S03 实现与待审阅状态、**手动验证改为只经前端界面的决定**、用户环境决定和 Git 仓库事实 |
-| docs/implementation/stages | 9 份阶段文档、43 个小步骤；S01 为 v1.3 且阶段已接受，S02 为 v1.3 且阶段已接受，S03 为 v1.6 且 S03-01—S03-07（含 §0.2、§0.3 追加项与 §0.4 返工）已实现、经返工复验后阶段已接受，S06 为 v1.1 且范围缩小，其余未批准开发 |
+| README、AGENTS、CLAUDE、docs 导航 | 已同步 S01/S02/S03 的**阶段已接受**结论（S03 含返工与 r02 复验接受）、**手动验证改为只经前端界面的决定**、用户环境决定和 Git 仓库事实（公开远程已推送 `ae427fb`，第二次提交含 S02/S03） |
+| docs/implementation/stages | 9 份阶段文档、43 个小步骤；S01 为 v1.3 且阶段已接受，S02 为 v1.3 且阶段已接受，S03 为 v1.6 且 S03-01—S03-07（含 §0.2、§0.3 追加项与 §0.4 返工）已实现、经返工复验后阶段已接受，**S04 为 v2.3 且 S04-01—S04-08 已获批准、实现完毕、自动化审阅通过并经用户 2026-10-07 界面验证接受（阶段已接受）**，S06 为 v1.1 且范围缩小，其余未批准开发 |
 | docs/implementation/handoffs | S01 前置检查、Conda 依赖说明与版本解析记录；不是阶段完成报告 |
 | docs/implementation/templates | 开发前方案（已弃用）、自动化报告、手动指南三份模板 |
 | reviews/automated/S01、reviews/manual/S01 | r01 自动化审阅报告（通过）、r01 手动指南（结果表用户未逐项填写）、r01 用户审阅结果（**接受**） |
@@ -269,8 +269,8 @@ aidhu_om_agent/
 - CLAUDE.local.md、.claude/settings.json、settings.local.json、.env、config.local.toml：按实际需要生成，个人文件不提交。
 - .claude/skills/database-migration/SKILL.md、.claude/agents/reviewer.md、.github/workflows/ci.yml：有需要再启用。
 - data/state.sqlite3：存储实现后生成，没有假数据库。
-- S04 及以后各阶段的方案/批准、自动化审阅与手动指南：到所属阶段按真实状态生成（S01—S03 的用户审阅结果均已生成）。
+- S04 及以后各阶段的方案/批准、自动化审阅与手动指南：到所属阶段按真实状态生成（S01—S04 的用户审阅结果均已生成）。
 
-[实施入口](implementation/README.md) · [S01 自动化审阅](implementation/reviews/automated/S01/r01-自动化审阅.md) · [S01 用户审阅结果](implementation/reviews/manual/S01/r01-用户审阅结果.md) · [S02 自动化审阅](implementation/reviews/automated/S02/r01-自动化审阅.md) · [S02 手动操作审阅](implementation/reviews/manual/S02/r01-手动操作审阅.md) · [S02 用户审阅结果](implementation/reviews/manual/S02/r01-用户审阅结果.md) · [S03 自动化审阅 r02](implementation/reviews/automated/S03/r02-自动化审阅.md) · [S03 手动操作审阅（界面版 r02）](implementation/reviews/manual/S03/r02-手动操作审阅.md) · [S03 用户审阅结果 r02](implementation/reviews/manual/S03/r02-用户审阅结果.md) · [环境与依赖](implementation/handoffs/S01-开发环境与依赖清单.md) · [交接状态](HANDOFF.md)
+[实施入口](implementation/README.md) · [S01 自动化审阅](implementation/reviews/automated/S01/r01-自动化审阅.md) · [S01 用户审阅结果](implementation/reviews/manual/S01/r01-用户审阅结果.md) · [S02 自动化审阅](implementation/reviews/automated/S02/r01-自动化审阅.md) · [S02 手动操作审阅](implementation/reviews/manual/S02/r01-手动操作审阅.md) · [S02 用户审阅结果](implementation/reviews/manual/S02/r01-用户审阅结果.md) · [S03 自动化审阅 r02](implementation/reviews/automated/S03/r02-自动化审阅.md) · [S03 手动操作审阅（界面版 r02）](implementation/reviews/manual/S03/r02-手动操作审阅.md) · [S03 用户审阅结果 r02](implementation/reviews/manual/S03/r02-用户审阅结果.md) · [S04 自动化审阅](implementation/reviews/automated/S04/r01-自动化审阅.md) · [S04 手动操作审阅（界面版）](implementation/reviews/manual/S04/r01-手动操作审阅.md) · [S04 用户审阅结果](implementation/reviews/manual/S04/r01-用户审阅结果.md) · [环境与依赖](implementation/handoffs/S01-开发环境与依赖清单.md) · [交接状态](HANDOFF.md)
 
-目录与文档生成不等于业务开发完成。S01 工程基础、S02 的输入解析与预检、S03 的两阶段判别与界面骨架均已实现、通过自动化审阅并经用户验收（**三个阶段均为阶段已接受**；S02 与 S03 为同一次界面操作一并验收，S03 的返工经 r02 复审与用户复验后接受）。持久化与 worker、批次与恢复、导出与下载仍未实现，属 S04—S06，**尚未讨论、未批准**；**用户手动验证只经前端界面，每个阶段须交付界面验证面**。
+目录与文档生成不等于业务开发完成。S01 工程基础、S02 的输入解析与预检、S03 的两阶段判别与界面骨架、S04 的持久化与 worker／批次与恢复均已实现、通过自动化审阅并经用户验收（**四个阶段均为阶段已接受**；S02 与 S03 为同一次界面操作一并验收，S03 的返工经 r02 复审与用户复验后接受，S04 于 2026-10-07 经界面验证接受）。导出与下载属 S05/S06，**尚未讨论、未批准**；**用户手动验证只经前端界面，每个阶段须交付界面验证面**。

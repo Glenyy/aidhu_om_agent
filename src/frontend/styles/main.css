@@ -12,6 +12,7 @@ body {
 .app-shell__header {
   display: flex;
   align-items: center;
+  gap: 2rem;
   border-bottom: 1px solid var(--el-border-color);
 }
 
@@ -19,4 +20,10 @@ body {
   margin: 0;
   font-size: 1.125rem;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 顶部导航在标题右侧；水平菜单自带下边框，这里去掉以免出现双线。 */
+.app-shell__nav {
+  border-bottom: none;
 }

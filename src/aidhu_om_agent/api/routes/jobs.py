@@ -15,8 +15,11 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from ...agent.pipeline import record_key_of
+from ...config import AppConfig
+from ...services.batches import BatchError, load_parsed_input
 from ...services.judging import JudgeJobRegistry
 from ...services.uploads import UploadStore
+from ..deps import database_connection
 from ..responses import fail, success
 from ..schemas import JudgeRequest
 
@@ -25,6 +28,7 @@ router = APIRouter(tags=["jobs"])
 
 @router.post("/judge", status_code=202)
 async def create_judge(request: Request, payload: JudgeRequest) -> Any:
+    config: AppConfig = request.app.state.config
     store: UploadStore = request.app.state.uploads
     jobs: JudgeJobRegistry = request.app.state.jobs
 
@@ -37,14 +41,19 @@ async def create_judge(request: Request, payload: JudgeRequest) -> Any:
             f"未知 validation_id：{payload.validation_id}；请重新预检",
         )
 
-    parsed = validation.parsed
-    if parsed.report.status != "passed":
+    if validation.status != "passed":
         return fail(
             request,
             409,
             "INPUT_NOT_VALIDATED",
             "该预检为 blocked，不能创建判别；请先修正输入后重新预检",
         )
+
+    try:
+        with database_connection(request) as connection:
+            parsed = load_parsed_input(connection, payload.validation_id, config=config)
+    except BatchError as exc:
+        return fail(request, exc.http_status, exc.code, exc.message, exc.details or None)
 
     record = next(
         (

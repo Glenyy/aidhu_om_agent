@@ -467,6 +467,33 @@ def test_unknown_validation_kind_falls_back_to_generic_hint() -> None:
     assert "逐项检查" in _feedback_hint(ValidationError("别的问题", kind="未登记的分类"))
 
 
+def test_format_hint_names_the_newline_escape() -> None:
+    """S04-08：`KIND_OUTPUT_FORMAT` 的反馈必须点明换行转义，而不是只说"输出 JSON"。
+
+    重试时模型看不到自己上一次的字符级问题，唯一能改的就是这句提示；不写清楚
+    「换行要写成 ``\\n``」，第二次很可能以同样的方式再失败一次。
+    """
+    from aidhu_om_agent.agent.pipeline import _feedback_hint
+    from aidhu_om_agent.agent.validation import KIND_OUTPUT_FORMAT, ValidationError
+
+    hint = _feedback_hint(ValidationError("模型输出不是合法 JSON", kind=KIND_OUTPUT_FORMAT))
+
+    assert "JSON" in hint
+    assert "\\n" in hint and "反斜杠" in hint
+    assert "真正的换行" in hint
+
+
+def test_substring_hint_mentions_escaping_and_list_markers() -> None:
+    """摘录对不上时，反馈要同时给出「转义」与「照抄列表符号」两条可操作信息。"""
+    from aidhu_om_agent.agent.pipeline import _feedback_hint
+    from aidhu_om_agent.agent.validation import KIND_EVIDENCE_SUBSTRING, ValidationError
+
+    hint = _feedback_hint(ValidationError("摘录不是原文子串", kind=KIND_EVIDENCE_SUBSTRING))
+
+    assert "\\n" in hint
+    assert "列表符号" in hint
+
+
 def test_payload_attempts_carry_raw_output_keys() -> None:
     bad = response(BAD_QUOTE_STAGE2)
     result, _, _ = run({STAGE1: [response(STAGE1_OK)], STAGE2: [bad]}, execution=execution(1))

@@ -5,6 +5,7 @@
 - 工程验证：``--version``、``--check-config``（S01）
 - 只读解析：``inspect <文件> [--sheet 名称]``（S02-05，输出预检 JSON，不写库）
 - 界面服务：``serve [--host] [--port]``（S03-07，供浏览器手动验证使用）
+- 队列 worker：``worker [--mode mock|real] [--once]``（S04-04，唯一消费者）
 
 ``run``/``resume``/``export``/``evaluate`` 等业务命令在 S05 实现，本阶段不提前开发。
 """
@@ -14,29 +15,28 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from importlib.metadata import PackageNotFoundError, version
 
 from .config import ConfigError, LimitsConfig, default_limits, load_config
 from .excel.reader import InputReadError, precheck
 from .schemas.qa import ParsedInput
+from .version import package_version
 
-_PACKAGE = "aidhu-om-agent"
-
-_IMPLEMENTED_COMMANDS = ("inspect", "serve")
+_IMPLEMENTED_COMMANDS = ("inspect", "serve", "worker")
 _PENDING_COMMANDS = ("run", "resume", "export", "evaluate")
 
 _NOT_IMPLEMENTED = (
     "尚未实现的业务命令：run、resume、export、evaluate。\n"
     "这些命令在 S05（导出与命令行闭环）按其阶段文档实现。\n"
-    "当前可用：--version、--check-config，只读解析入口 inspect，以及界面服务 serve。"
+    "当前可用：--version、--check-config，只读解析入口 inspect，界面服务 serve，"
+    "以及队列 worker。"
 )
+
+#: worker 命令的退出码：3 表示独占锁被占用（**队列状态未被改动**）。
+EXIT_LOCK_HELD = 3
 
 
 def _package_version() -> str:
-    try:
-        return version(_PACKAGE)
-    except PackageNotFoundError:
-        return "0.0.0+unknown"
+    return package_version()
 
 
 def _enable_utf8_when_redirected() -> None:
@@ -78,7 +78,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         choices=[*_IMPLEMENTED_COMMANDS, *_PENDING_COMMANDS],
-        help="inspect 为已实现的只读解析入口；其余为未实现的业务命令占位",
+        help=(
+            "已实现：inspect(只读解析)／serve(界面服务)／worker(队列消费者)；"
+            "run、resume、export、evaluate 为未实现占位"
+        ),
     )
     parser.add_argument(
         "input",
@@ -106,6 +109,23 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8000,
         help="serve 的监听端口，默认 8000",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["mock", "real"],
+        default="mock",
+        help="worker 的执行模式；默认 mock（模拟，零真实调用与费用）",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="worker 消费完当前队列后退出，不常驻轮询",
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=None,
+        help="worker 无任务时的轮询间隔（秒），默认 1.0",
     )
     return parser
 
@@ -192,6 +212,70 @@ def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _worker(args: argparse.Namespace) -> int:
+    """消费判别队列；锁被占用时**不动队列**并以 3 退出。"""
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"配置错误：{exc}", file=sys.stderr)
+        return 1
+
+    from .worker import DEFAULT_POLL_SECONDS, Worker, WorkerError, WorkerLockError
+
+    poll_seconds = (
+        DEFAULT_POLL_SECONDS if args.poll_seconds is None else args.poll_seconds
+    )
+    try:
+        worker = Worker(config, mode=args.mode, poll_seconds=poll_seconds)
+    except WorkerError as exc:
+        print(f"worker 无法启动：{exc}", file=sys.stderr)
+        return 1
+
+    if args.mode == "real":
+        print(
+            "警告：real 模式会产生**真实模型调用与费用**。本阶段（S04）的真实调用"
+            "预算已用满，除非另有授权，请使用默认的 mock 模式。",
+            file=sys.stderr,
+        )
+
+    try:
+        recovery = worker.start()
+    except WorkerLockError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return EXIT_LOCK_HELD
+    except WorkerError as exc:
+        print(f"worker 启动失败：{exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"worker {worker.worker_id} 已启动（模式 {args.mode}）；"
+        f"数据库 {config.paths.database}"
+    )
+    if recovery.changed:
+        print(
+            "启动恢复："
+            f"调用标记中断 {recovery.attempts_marked_unknown} 条、"
+            f"任务标记 interrupted {recovery.jobs_marked_interrupted} 个、"
+            f"批次标记 interrupted {recovery.runs_marked_interrupted} 个"
+        )
+    if args.once:
+        print("--once：消费完当前队列后退出（不常驻轮询）")
+    else:
+        print("按 Ctrl+C 停止；退出时保留未消费的 queued 任务。")
+
+    try:
+        processed = worker.run_forever(max_idle_rounds=1 if args.once else None)
+    except KeyboardInterrupt:
+        print("\n收到中断，正在释放 worker 锁……", file=sys.stderr)
+        return 0
+    finally:
+        worker.stop()
+
+    if args.once:
+        print(f"本次消费任务数：{processed}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _enable_utf8_when_redirected()
     parser = _build_parser()
@@ -202,6 +286,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "serve":
         return _serve(args)
+
+    if args.command == "worker":
+        return _worker(args)
 
     if args.check_config:
         return _check_config()

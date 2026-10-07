@@ -15,9 +15,20 @@ from pathlib import Path
 import pytest
 from openpyxl import load_workbook
 
-from aidhu_om_agent.agent.mock_samples import SCENARIOS, scenario_for
+from aidhu_om_agent.agent.mock_samples import (
+    SCENARIOS,
+    SCENARIO_FORCED_FAILURE,
+    SLOW_RECORD_DELAYS_MS,
+    scenario_for,
+)
 from aidhu_om_agent.excel.reader import PREFERRED_SHEET, precheck
-from aidhu_om_agent.excel.samples import SAMPLES, build_workbook_bytes, get_sample
+from aidhu_om_agent.excel.samples import (
+    FORCED_FAILURE_RECORD_ID,
+    SAMPLES,
+    SLOW_RECORD_IDS,
+    build_workbook_bytes,
+    get_sample,
+)
 from aidhu_om_agent.schemas.qa import INPUT_COLUMNS
 
 #: 每份样例宣称的预检结果；与 description 一一对应。
@@ -75,6 +86,24 @@ EXPECTED_OUTCOME: dict[str, dict[str, int | str]] = {
         "skipped_blank_rows": 0,
         "row_errors": 0,
         "valid_records": 1,
+    },
+    "mixed-outcome": {
+        "status": "passed",
+        "total": 3,
+        "valid": 3,
+        "input_invalid": 0,
+        "skipped_blank_rows": 0,
+        "row_errors": 0,
+        "valid_records": 3,
+    },
+    "slow-batch": {
+        "status": "passed",
+        "total": 3,
+        "valid": 3,
+        "input_invalid": 0,
+        "skipped_blank_rows": 0,
+        "row_errors": 0,
+        "valid_records": 3,
     },
 }
 
@@ -204,3 +233,32 @@ def test_longest_sample_has_a_multi_line_ref(tmp_path: Path) -> None:
 
 def test_get_sample_unknown_returns_none() -> None:
     assert get_sample("does-not-exist") is None
+
+
+# ------------------------------------------------- S04-07 新增的两份样例
+
+
+def test_mixed_outcome_sample_has_exactly_one_forced_failure(tmp_path: Path) -> None:
+    """混合样例要同时给出「一条失败 + 其余成功」，否则界面看到的是另一种批次。
+
+    只有一条落进技术失败、其余都不是，才是 partial_failed 的最小可读样本；
+    全失败会变成「批次整体失败」，与说明不符。
+    """
+    parsed = _parsed(tmp_path, "mixed-outcome")
+    scenarios = {record.record_id: scenario_for(record) for record in parsed.valid_records()}
+    assert scenarios[FORCED_FAILURE_RECORD_ID] == SCENARIO_FORCED_FAILURE
+    failures = [key for key, value in scenarios.items() if value == SCENARIO_FORCED_FAILURE]
+    assert failures == [FORCED_FAILURE_RECORD_ID]
+    assert len(scenarios) == 3
+
+
+def test_slow_batch_sample_records_are_all_slow(tmp_path: Path) -> None:
+    """慢速样例的每条记录都必须命中延迟映射，否则整批跑得太快、制不出中断窗口。"""
+    parsed = _parsed(tmp_path, "slow-batch")
+    ids = [record.record_id for record in parsed.valid_records()]
+    assert ids == list(SLOW_RECORD_IDS)
+    assert all(record_id in SLOW_RECORD_DELAYS_MS for record_id in ids)
+
+    # 整批两阶段：界面上必须在数秒量级，用户才有时间切到 worker 窗口停掉它。
+    total_seconds = sum(SLOW_RECORD_DELAYS_MS[record_id] for record_id in ids) * 2 / 1000
+    assert total_seconds >= 3.0

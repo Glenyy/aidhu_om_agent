@@ -1,11 +1,18 @@
-"""S03-07：上传与预检接口。
+"""上传与预检接口（S03-07；S04-02 起落库）。
 
-- ``POST /api/uploads``：保存 .xlsx，返回 upload_id 与工作表清单。**不调用模型**。
+- ``POST /api/uploads``：保存 .xlsx，登记到 `uploads`，返回 upload_id 与工作表清单。
+  **不调用模型**。
 - ``POST /api/uploads/{upload_id}/validate``：复用 `excel.reader.precheck()` 产出
-  预检计数、阻断项、单条问题与有效记录列表。**不写库、不改写原文件**。
+  预检计数、阻断项、单条问题与有效记录列表，报告写入 `input_validations`。
+  **不改写原文件**。
 
-字段对齐 [plan/08 §3](../../../../plan/08-API接口与数据合同.md)；本阶段不实现
-幂等请求头、批次创建与分页（S04／S06）。
+字段对齐 [plan/08 §3](../../../../plan/08-API接口与数据合同.md)。本接口**不要求**
+`Idempotency-Key`：上传与预检不产生模型调用（plan/08 §4）；批次创建（`/api/runs`）
+才要求。分页属 S06。
+
+**临时字段说明**：这里的 ``record_key`` 仍取「编号或来源行」——它是 S03 判一条
+临时接口的选择键，**不是** `records` 表里程序生成的 UUID 主键（S06 用批次记录
+接口取代 `/api/judge` 后消失）。
 """
 
 from __future__ import annotations
@@ -16,7 +23,7 @@ from fastapi import APIRouter, File, Request, UploadFile
 
 from ...agent.pipeline import record_key_of
 from ...config import AppConfig
-from ...excel.reader import InputReadError, precheck, select_sheet, sheet_catalog
+from ...excel.reader import InputReadError, precheck, select_sheet
 from ...schemas.qa import ParsedInput, QARecord
 from ...services.uploads import UploadStore, UploadTooLargeError
 from ..responses import fail, success
@@ -87,14 +94,13 @@ async def create_upload(request: Request, file: UploadFile = File(...)) -> Any:
         )
     except UploadTooLargeError as exc:
         return fail(request, 413, "FILE_TOO_LARGE", str(exc))
+    except InputReadError as exc:
+        # 工作簿读不出工作表清单：文件已删除且未登记，不留下半份上传。
+        return fail(request, 422, "BAD_WORKBOOK", str(exc))
     finally:
         await file.close()
 
-    try:
-        catalog = sheet_catalog(record.path)
-    except InputReadError as exc:
-        return fail(request, 422, "BAD_WORKBOOK", str(exc))
-
+    catalog = record.sheets
     return success(
         request,
         {
