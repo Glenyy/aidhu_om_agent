@@ -8,12 +8,12 @@
 - 队列 worker：``worker [--mode mock|real] [--once]``（S04-04，唯一消费者）
 - 业务闭环：``run <文件.xlsx>``、``resume <run_id>``、``export <run_id>``（S05-06，
   与网页走**同一套服务**：命令只入队，执行仍由独立 worker 完成）
-
-``evaluate`` 在本阶段**只定参数合同**：``--help`` 可见四个参数，运行到实现处提示
-「未实现，将在 S07 提供」并返回 2；指标计算属 S07，这里不写任何计算逻辑。
+- 质量评估：``evaluate --run-id … --gold … --split-manifest … --split …``（S07-03，
+  **零模型调用、不依赖 worker**：读已落库的原预测与两个文件，算指标、落库、落盘报告）
 
 CLI 与网页的分工见 [api 规则](../../.claude/rules/api.md)：网页和 CLI 复用服务。
 因此 ``run`` 不是「另起一套执行」——它上传、预检、创建批次，然后交给 worker。
+``evaluate`` 同理：网页上的评估页**只读**，计算入口只有这条命令。
 """
 
 from __future__ import annotations
@@ -40,19 +40,23 @@ from .excel.reader import InputReadError, precheck
 from .schemas.qa import ParsedInput
 from .version import package_version
 
-_IMPLEMENTED_COMMANDS = ("inspect", "serve", "worker", "run", "resume", "export")
-#: 只在 argparse 中定契约、实现属 S07 的命令。
-_PENDING_COMMANDS = ("evaluate",)
-
-_NOT_IMPLEMENTED = (
-    "未实现，将在 S07 提供：本阶段只确定 evaluate 的参数合同"
-    "（--run-id、--gold、--split-manifest、--split），不计算任何指标。"
+_IMPLEMENTED_COMMANDS = (
+    "inspect",
+    "serve",
+    "worker",
+    "run",
+    "resume",
+    "export",
+    "evaluate",
 )
+#: 只在 argparse 中定契约、尚无实现的命令；S07-03 起 `evaluate` 已移入上面。
+_PENDING_COMMANDS: tuple[str, ...] = ()
 
 _USAGE_HINT = (
     "没有指定命令。可用：--version、--check-config；"
     "inspect <文件.xlsx>（只读预检）；run <文件.xlsx>（上传并建批次）；"
-    "resume <run_id>、export <run_id>；serve（界面服务）；worker（队列消费者）。\n"
+    "resume <run_id>、export <run_id>；serve（界面服务）；worker（队列消费者）；"
+    "evaluate（按人工基准算指标，不调用模型）。\n"
     "加 --help 查看全部参数。"
 )
 
@@ -116,8 +120,8 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=[*_IMPLEMENTED_COMMANDS, *_PENDING_COMMANDS],
         help=(
             "已实现：inspect(只读解析)／serve(界面服务)／worker(队列消费者)／"
-            "run(上传并建批次)／resume(恢复)／export(排一份导出)；"
-            "evaluate 只定参数合同，实现属 S07"
+            "run(上传并建批次)／resume(恢复)／export(排一份导出)／"
+            "evaluate(按人工基准算指标，不调用模型)"
         ),
     )
     parser.add_argument(
@@ -664,13 +668,83 @@ def _export(args: argparse.Namespace) -> int:
 
 
 def _evaluate(args: argparse.Namespace) -> int:
-    """``evaluate``：本阶段只定参数合同，实现属 S07。
+    """``evaluate``：按人工核定基准给一个批次算指标（S07-03）。
 
-    参数（``--run-id``、``--gold``、``--split-manifest``、``--split``）已在 ``--help``
-    中可见；这里**不计算任何指标**，也不读任何文件。
+    四个参数全部来自命令行，**不调用任何模型、不依赖 worker**：本命令只读已落库的
+    原预测与两个文件（人工核定、划分清单），做算术，然后写一条评估记录与两份报告。
+
+    退出码（沿 S05 阶段文档 §0.2 第 12 项）：``0`` 成功；``1`` 配置或环境问题；
+    ``2`` 参数不合法、或状态不适用——**三道闸门任一不通过都是 2**，其中编号集合
+    不一致（`ID_SET_MISMATCH`）是防保留集泄漏的主要技术闸门。
     """
-    print(_NOT_IMPLEMENTED, file=sys.stderr)
-    return 2
+    missing = [
+        name
+        for name, value in (
+            ("--run-id", args.run_id),
+            ("--gold", args.gold),
+            ("--split-manifest", args.split_manifest),
+            ("--split", args.split),
+        )
+        if not value
+    ]
+    if missing:
+        print(
+            "evaluate 需要四个参数：--run-id、--gold、--split-manifest、--split。"
+            f"缺少：{'、'.join(missing)}\n"
+            "例：python -m aidhu_om_agent evaluate --run-id <批次> "
+            "--gold data/evaluation/gold-v1.xlsx "
+            "--split-manifest data/evaluation/split-v1.json --split calibration",
+            file=sys.stderr,
+        )
+        return 2
+
+    config = _cli_config(args)
+    if config is None:
+        return 1
+
+    from .services.evaluation import EvaluationError, run_evaluation
+
+    database = _open_database(config)
+    try:
+        outcome = run_evaluation(
+            database,
+            run_id=args.run_id,
+            gold_path=Path(args.gold).expanduser(),
+            manifest_path=Path(args.split_manifest).expanduser(),
+            split=args.split,
+            config=config,
+        )
+    except EvaluationError as exc:
+        print(f"评估未执行：[{exc.code}] {exc.message}", file=sys.stderr)
+        for item in (exc.details or {}).get("problems", [])[:10]:
+            row = f"第 {item['source_row']} 行：" if item.get("source_row") else ""
+            print(f"  {row}{item.get('message', '')}", file=sys.stderr)
+        return 2 if exc.http_status < 500 else 1
+
+    metrics = outcome.metrics
+    print(f"评估完成：evaluation_id={outcome.evaluation_id}")
+    print(f"  批次 {outcome.run_id}；一侧 {outcome.split}")
+    print(
+        f"  参与评分 {metrics.valid_total} 条"
+        f"（有预测 {len(metrics.scored) - len(metrics.missing_ids)} 条、"
+        f"技术失败 {len(metrics.failed_ids)} 条、"
+        f"未完成 {len(metrics.unfinished_ids)} 条）"
+    )
+    print(
+        f"  Macro-F1 {metrics.macro_f1.display()}；"
+        f"总体一致率 {metrics.agreement.display()}；"
+        f"非正确类误判正确率 {metrics.wrong_as_correct.display()}"
+    )
+    print(f"  分类完成率 {metrics.completion.display()}；复核比例 {metrics.review_ratio.display()}")
+    for check in outcome.checks:
+        verdict = "不可计算" if check.passed is None else ("达标" if check.passed else "未达标")
+        print(f"  [{verdict}] {check.name}（要求 {check.requirement}，实际 {check.actual}）")
+    for warning in outcome.warnings:
+        print(f"  提示：{warning}", file=sys.stderr)
+    print(f"  报告：{outcome.report_text_path}")
+    print(f"        {outcome.report_json_path}")
+    print("  评估页：批次详情页 →「评估」入口；本命令未调用任何模型。")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

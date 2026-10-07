@@ -8,7 +8,7 @@
   任务终态未成功 → 5；等待中 worker 消失 → 4；
 - ``export``：入队 → worker 生成两份文件 → 0；
 - ``--config`` 优先级：显式 ``--config`` > ``config.local.toml`` > ``config.toml``；
-- ``evaluate``：只定参数合同，运行到实现处返回 2。
+- ``evaluate``：四个参数缺一即 2（**实现**在 S07-03，见 `test_evaluation_service.py`）。
 
 全程模拟模式、本地 SQLite；**零真实模型调用**。``run`` 自己**永远不调用模型**——
 本文件里的 worker 都由测试线程注入模拟客户端。
@@ -378,16 +378,18 @@ def test_config_precedence_explicit_then_local_then_plain(
 # ----------------------------------------------------------------- evaluate
 
 
-def test_evaluate_only_defines_the_contract(capsys) -> None:
+def test_evaluate_requires_all_four_arguments(capsys) -> None:
+    """四个参数缺一即 2，且**在读取配置之前**就返回：不产生任何副作用。"""
     parser = cli._build_parser()
     args = parser.parse_args(
-        ["evaluate", "--run-id", "r1", "--gold", "gold.xlsx", "--split", "test"]
+        ["evaluate", "--run-id", "r1", "--gold", "gold.xlsx", "--split", "calibration"]
     )
-    assert (args.run_id, args.gold, args.split) == ("r1", "gold.xlsx", "test")
+    assert (args.run_id, args.gold, args.split) == ("r1", "gold.xlsx", "calibration")
     assert args.split_manifest is None
 
     assert cli.main(["evaluate", "--run-id", "r1"]) == 2
-    assert "未实现，将在 S07 提供" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "--gold" in err and "--split-manifest" in err and "--split" in err
 
 
 def test_no_command_prints_the_usage_hint(capsys) -> None:

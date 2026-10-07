@@ -4,6 +4,9 @@
 import axios from 'axios';
 
 import type {
+  EvaluationDetail,
+  EvaluationListPage,
+  EvaluationRecordListPage,
   ExportCreated,
   ExportListPage,
   JobDetail,
@@ -255,6 +258,63 @@ export function fetchRecord(runId: string, recordKey: string): Promise<RunRecord
   return unwrap<RunRecordDetail>(
     http.get<SuccessEnvelope<RunRecordDetail>>(
       `/runs/${runId}/records/${encodeURIComponent(recordKey)}`,
+    ),
+  );
+}
+
+// ------------------------------------------- S07-03：评估结果查询（**只读**）
+
+/**
+ * 某批次的评估历史，新→旧。
+ *
+ * 这里**没有**发起评估的函数：计算入口只有 CLI `evaluate`（[plan/08]），网页不做
+ * 重活。同一批次可以用不同划分评多次，每次都留痕，所以历史是列表。
+ */
+export function fetchRunEvaluations(
+  runId: string,
+  page = 1,
+  pageSize = 20,
+): Promise<EvaluationListPage> {
+  return unwrap<EvaluationListPage>(
+    http.get<SuccessEnvelope<EvaluationListPage>>(`/runs/${runId}/evaluations`, {
+      params: { page, page_size: pageSize },
+    }),
+  );
+}
+
+/** 单份评估：指标、达标判定、划分要点、冻结清单与报告正文。 */
+export function fetchEvaluation(evaluationId: string): Promise<EvaluationDetail> {
+  return unwrap<EvaluationDetail>(
+    http.get<SuccessEnvelope<EvaluationDetail>>(
+      `/evaluations/${encodeURIComponent(evaluationId)}`,
+    ),
+  );
+}
+
+export interface EvaluationRecordQuery {
+  page?: number;
+  pageSize?: number;
+  /** `null` = 不筛；`false` 只命中「有预测但不一致」，无预测的行要用 `status` 筛。 */
+  agree?: boolean | null;
+  status?: string | null;
+  recordId?: string | null;
+}
+
+export function fetchEvaluationRecords(
+  evaluationId: string,
+  query: EvaluationRecordQuery = {},
+): Promise<EvaluationRecordListPage> {
+  const params: Record<string, string | number | boolean> = {
+    page: query.page ?? 1,
+    page_size: query.pageSize ?? 50,
+  };
+  if (query.agree !== null && query.agree !== undefined) params.agree = query.agree;
+  if (query.status) params.status = query.status;
+  if (query.recordId) params.record_id = query.recordId;
+  return unwrap<EvaluationRecordListPage>(
+    http.get<SuccessEnvelope<EvaluationRecordListPage>>(
+      `/evaluations/${encodeURIComponent(evaluationId)}/records`,
+      { params },
     ),
   );
 }

@@ -2,7 +2,7 @@
 
 已挂载的接口：合成样例下载、上传、预检（S03-07），任务查询（S03-07；S06-02 起读库），
 批次创建（S04-02）、恢复（S04-05）、批次列表与详情（S04-07）、记录列表与详情（S06-01），
-手动导出与导出历史（S05-04）、已登记文件下载（S05-04）。
+手动导出与导出历史（S05-04）、已登记文件下载（S05-04）、评估结果查询（S07-03，**只读**）。
 
 前端的 history 路由由 `_mount_frontend` 的回落处理，`/api/...` 不走回落。
 
@@ -30,7 +30,7 @@ from ..services.uploads import UploadStore
 from ..storage import Database
 from ..version import package_version
 from .responses import fail
-from .routes import artifacts, jobs, runs, samples, uploads
+from .routes import artifacts, evaluations, jobs, runs, samples, uploads
 
 #: 框架级 HTTP 错误 → 本项目错误码（[plan/08 §1]）。未列出的状态码用 `HTTP_ERROR`
 #: 兜底，仍然给出信封，不让 ``{"detail": ...}`` 漏出去。
@@ -55,7 +55,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app = FastAPI(
         title="AIDHU 回答判别 Agent API",
         version=package_version(),
-        description="上传、预检、批次创建、批次与记录查询、恢复、导出与任务查询。",
+        description="上传、预检、批次创建、批次与记录查询、恢复、导出、任务与评估查询。",
     )
     app.state.config = app_config
     app.state.db = database
@@ -102,6 +102,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(uploads.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
+    app.include_router(evaluations.router, prefix="/api")
     app.include_router(artifacts.router, prefix="/api")
 
     dist = app_config.paths.frontend_dist

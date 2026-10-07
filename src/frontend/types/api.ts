@@ -438,3 +438,214 @@ export interface RunRecordDetail {
   created_at: string;
   updated_at: string;
 }
+
+// ------------------------------------- S07-03：评估结果查询（只读，plan/04 §5–6）
+
+/** `evaluations.split`；与后端 `evaluation/split.py` 的 `SPLITS` 同值。 */
+export type EvaluationSplit = 'calibration' | 'holdout';
+
+/**
+ * 一个指标。**同时给分子与分母**：只给一个比率就没法核对怎么算出来的。
+ * `computable=false`（分母为 0）时 `value` 为 `null`、`display` 是「不可计算」，
+ * 界面必须照实显示，**不能当作 0 或通过**（plan/04 §5）。
+ */
+export interface EvaluationMetric {
+  numerator: number;
+  denominator: number;
+  value: number | null;
+  computable: boolean;
+  display: string;
+}
+
+/** 单类指标；`support` 是该类**人工标签**的条数，也就是召回率的分母。 */
+export interface EvaluationClassMetrics {
+  label: string;
+  tp: number;
+  fp: number;
+  fn: number;
+  support: number;
+  precision: EvaluationMetric;
+  recall: EvaluationMetric;
+  f1: EvaluationMetric;
+}
+
+/** 一条达标判定；`passed` 为 `null` 表示不可计算，**不算通过**。 */
+export interface EvaluationThresholdCheck {
+  key: string;
+  name: string;
+  requirement: string;
+  actual: string;
+  passed: boolean | null;
+}
+
+/** 评估历史列表项；`passed` 是「全部检查都达标」，含不可计算项时为 false。 */
+export interface EvaluationSummary {
+  evaluation_id: string;
+  run_id: string;
+  split: EvaluationSplit;
+  created_at: string;
+  gold_filename: string;
+  gold_data_version: string;
+  manifest_sha256: string;
+  valid_count: number;
+  scored_count: number;
+  excluded_count: number;
+  macro_f1: string | null;
+  agreement: string | null;
+  wrong_as_correct: string | null;
+  completion: string | null;
+  passed: boolean;
+  report_text_name: string;
+}
+
+export interface EvaluationListPage {
+  items: EvaluationSummary[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+/** 参与评分的口径：`missing` = 有效核定条数 − 有合法预测的条数。 */
+export interface EvaluationCounts {
+  valid: number;
+  scored: number;
+  excluded: number;
+  missing: number;
+}
+
+/** 划分清单要点；落库保存，因此清单文件被删掉也读得懂这一批是怎么分的。 */
+export interface EvaluationSplitInfo {
+  split: EvaluationSplit;
+  seed: number;
+  manifest_version: string;
+  calibration_target: number;
+  gold_filename: string;
+  gold_data_version: string;
+  gold_sha256_prefix: string;
+  calibration: number;
+  holdout: number;
+  calibration_by_label: Record<string, number>;
+  holdout_by_label: Record<string, number>;
+  forced_calibration: string[];
+  excluded_ids: string[];
+  excluded_reasons: Record<string, string>;
+  selected_ids: string[];
+}
+
+/** 冻结清单（S07 阶段文档 §0.3 第 8 项）：这批评测结论属于哪个版本。 */
+export interface EvaluationFreeze {
+  program: string;
+  stage1_prompt_version: string | null;
+  stage2_prompt_version: string | null;
+  stage1_schema_version: string | null;
+  stage2_schema_version: string | null;
+  input_contract_version: string | null;
+  /** 与批次详情的 `model_config` **同一来源**（同一组键），两页必须一致。 */
+  model_config: Record<string, unknown>;
+  gold: {
+    filename: string;
+    data_version: string;
+    contract_version: string;
+    sha256: string;
+    sha256_prefix: string;
+    annotated_by: string | null;
+    annotated_on: string | null;
+    source_sha256_prefix: string | null;
+  };
+  manifest: {
+    filename: string;
+    version: string;
+    sha256: string;
+    seed: number;
+    gold_sha256_match: boolean;
+  };
+  frozen_at: string;
+}
+
+/** 参与评分的全部指标；`confusion[人工真值][agent 预测] = 条数`。 */
+export interface EvaluationMetrics {
+  valid_total: number;
+  scored_total: number;
+  excluded_total: number;
+  excluded_ids: string[];
+  confusion: Record<string, Record<string, number>>;
+  per_class: Record<string, EvaluationClassMetrics>;
+  macro_f1: EvaluationMetric;
+  agreement: EvaluationMetric;
+  wrong_as_correct: EvaluationMetric;
+  completion: EvaluationMetric;
+  review_ratio: EvaluationMetric;
+  /** 没有合法预测的编号；`failed_ids` 是技术失败，`unfinished_ids` 是没跑完。 */
+  missing_ids: string[];
+  failed_ids: string[];
+  unfinished_ids: string[];
+}
+
+/**
+ * 一份评估的全部内容。
+ *
+ * `report_text` 是报告正文（Markdown），**直接内嵌**：评估报告不是导出产物，
+ * 够不着 `artifacts` 的下载接口，页面用 Blob 把它存成本地文件。
+ */
+export interface EvaluationDetail {
+  evaluation_id: string;
+  run_id: string;
+  split: EvaluationSplit;
+  created_at: string;
+  gold: {
+    filename: string;
+    sha256: string;
+    sha256_prefix: string;
+    data_version: string;
+    contract_version: string;
+  };
+  manifest: {
+    filename: string;
+    sha256: string;
+    sha256_prefix: string;
+    version: string;
+    seed: number;
+  };
+  run: {
+    run_id: string;
+    source_filename: string;
+    status: JobStatus;
+    revision: number;
+    total_count: number;
+    valid_count: number;
+  } | null;
+  split_info: EvaluationSplitInfo;
+  freeze: EvaluationFreeze;
+  metrics: EvaluationMetrics;
+  thresholds: EvaluationThresholdCheck[];
+  counts: EvaluationCounts;
+  report_files: {
+    name: string;
+    kind: 'text' | 'json';
+    exists: boolean;
+    size_bytes: number | null;
+  }[];
+  report_text: string | null;
+}
+
+/**
+ * 逐条对照。`agree` 为 `null` 表示**没有预测**（技术失败或未跑完）——
+ * 「不一致」与「没判出来」是两种不同的信号，`agree=false` 不会命中空值。
+ */
+export interface EvaluationRecordItem {
+  record_id: string;
+  record_key: string;
+  gold_label: string;
+  agent_label: string | null;
+  agree: boolean | null;
+  review_required: boolean | null;
+  record_status: RecordStatus;
+  failure_stage: string | null;
+}
+
+export interface EvaluationRecordListPage {
+  items: EvaluationRecordItem[];
+  page: number;
+  page_size: number;
+  total: number;
+}

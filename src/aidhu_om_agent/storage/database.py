@@ -26,7 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 #: 本程序理解的结构版本；数据库记录到更高版本时拒绝读取（程序比库旧）。
-SCHEMA_VERSION = 2
+#: 3（S07-03）：新增 `evaluations` 与 `evaluation_records`，评估结果落库。
+SCHEMA_VERSION = 3
 
 #: 迁移脚本目录（随包分发，见 pyproject 的 wheel 打包范围）。
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"

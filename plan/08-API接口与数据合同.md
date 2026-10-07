@@ -43,8 +43,11 @@
 | GET /api/runs/{run_id}/exports | page、page_size | 200；历史导出与文件标识 |
 | GET /api/jobs/{job_id} | 无 | 200；任务状态、活动阶段、错误、结果标识 |
 | GET /api/artifacts/{artifact_id}/download | 无 | 200；已登记的完整文件 |
+| GET /api/runs/{run_id}/evaluations | page、page_size | 200；该批次的评估历史（新→旧） |
+| GET /api/evaluations/{evaluation_id} | 无 | 200；指标、达标判定、划分要点、冻结清单与报告正文 |
+| GET /api/evaluations/{evaluation_id}/records | 分页与筛选参数 | 200；逐条对照（人工标签 vs agent 原预测） |
 
-运行模型、修改模型配置和人工编辑标签不属于网页接口。质量 evaluate 仍为辅助 CLI，不增加网页评估入口。
+运行模型、修改模型配置和人工编辑标签不属于网页接口。质量评估的计算入口仍只有 CLI；S07 新增**只读**评估展示页，不提供网页计算或标签编辑入口。
 
 上传使用 multipart/form-data；其余带请求体的接口使用 JSON。FastAPI 官方文档说明文件上传的表单编码不能与同一请求中的 JSON Body 混用，所以先上传获得 upload_id，再通过 JSON 完成预检和创建。[FastAPI 文件与表单](https://fastapi.tiangolo.com/tutorial/request-forms-and-files/)
 

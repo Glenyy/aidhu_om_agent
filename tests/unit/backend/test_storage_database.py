@@ -23,6 +23,9 @@ from aidhu_om_agent.storage import database
 EXPECTED_TABLES = (
     "artifacts",
     "call_attempts",
+    # 结构版本 3（S07-03）：评估汇总与逐条对照。
+    "evaluation_records",
+    "evaluations",
     "exports",
     "idempotency_keys",
     "input_validations",
@@ -51,6 +54,26 @@ INSERT INTO records (
     created_at, updated_at
 ) VALUES (?, 'R1', ?, ?, ?, ?, ?, '[]', '{}', ?, ?, ?,
           '2026-10-06T00:00:00+00:00', '2026-10-06T00:00:00+00:00')
+"""
+
+#: 003 建出的评估汇总表；`run_id` 由调用方给，好用来验外键。
+EVALUATION_INSERT = """
+INSERT INTO evaluations (
+    evaluation_id, run_id, split, gold_filename, gold_sha256, gold_data_version,
+    gold_contract_version, manifest_filename, manifest_sha256, manifest_version,
+    seed, split_json, versions_json, metrics_json, thresholds_json,
+    report_json_name, report_text_name, valid_count, scored_count, excluded_count,
+    created_at
+) VALUES (?, ?, 'calibration', 'gold.xlsx', 'a' || '0' * 63, 'synthetic-v1', '1.0',
+          'split-v1.json', 'b' || '0' * 63, '1.0', 20261005,
+          '{}', '{}', '{}', '{}', 'e.json', 'e.md', ?, ?, ?, ?)
+"""
+
+EVALUATION_RECORD_INSERT = """
+INSERT INTO evaluation_records (
+    evaluation_id, record_id, record_key, gold_label, agent_label, agree,
+    review_required, record_status, failure_stage
+) VALUES ('E1', ?, NULL, '回答正确', ?, ?, 0, ?, NULL)
 """
 
 NOW = "2026-10-06T00:00:00+00:00"
@@ -221,8 +244,9 @@ def test_v2_migration_upgrades_an_existing_v1_database(
 ) -> None:
     """结构变更走**新增脚本**：旧库升到 v2，既有行保留、新列取默认值。"""
     path = tmp_path / "state.sqlite3"
-    # 先把脚本目录限制到 v1：程序拒绝运行高于自己理解的脚本，因此不能直接用
-    # 随包的 001+002 造出一个停在 v1 的旧库。
+    # 临时脚本目录**按要验的版本逐份放**：程序拒绝运行高于自己理解的脚本，用随包的
+    # 完整目录造不出一个停在 v1 的旧库（002 起就会立刻被拒）。这样以后每加一个迁移，
+    # 这条断言仍然只验 001→002 这一段。
     packaged = database.MIGRATIONS_DIR
     staged = tmp_path / "migrations"
     staged.mkdir()
@@ -244,7 +268,8 @@ def test_v2_migration_upgrades_an_existing_v1_database(
     finally:
         connection.close()
 
-    monkeypatch.setattr(database, "MIGRATIONS_DIR", packaged)
+    # 第二次打开：把 002 放进目录、把「程序理解的版本」抬到 2，于是它成为待应用脚本。
+    shutil.copy(packaged / "002_worker_visibility.sql", staged / "002_worker_visibility.sql")
     monkeypatch.setattr(database, "SCHEMA_VERSION", 2)
     connection = storage.connect(path)
     try:
@@ -259,6 +284,67 @@ def test_v2_migration_upgrades_an_existing_v1_database(
         (row,) = connection.execute("SELECT * FROM runtime_state")
         assert row["worker_id"] == "old-worker"
         assert row["worker_mode"] is None
+    finally:
+        connection.close()
+
+
+def test_v3_migration_upgrades_an_existing_v2_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """003 也是**新增脚本**：v2 的库升到 v3，升级前就有的批次能被新表直接引用。
+
+    验的是**随包的真实脚本**（不是自己写的假脚本）：先造一个停在 v2、带批次行的库，
+    再用 003 升上去。前面的 `test_v2_…` 用临时目录逐份放脚本，所以每加一个迁移它
+    仍只验 001→002；「已存在的库怎么升到 3」这一段由本用例补上。
+    """
+    path = tmp_path / "state.sqlite3"
+    packaged = database.MIGRATIONS_DIR
+    staged = tmp_path / "migrations"
+    staged.mkdir()
+    for name in ("001_init.sql", "002_worker_visibility.sql"):
+        shutil.copy(packaged / name, staged / name)
+    monkeypatch.setattr(database, "MIGRATIONS_DIR", staged)
+    monkeypatch.setattr(database, "SCHEMA_VERSION", 2)
+    connection = storage.connect(path)
+    try:
+        assert storage.migrate(connection).version == 2
+        seed_run(connection)
+        # v2 的库里**没有**评估表：下面第二段要证明的正是「升上来之后才出现」。
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'evaluations'"
+        ).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+    # 第二次打开：随包目录（含 003）+ 程序版本 3，于是 003 成为待应用脚本。
+    # 备份目录给在 tmp_path 下，绝不写到真实的 data/backups。
+    monkeypatch.setattr(database, "MIGRATIONS_DIR", packaged)
+    monkeypatch.setattr(database, "SCHEMA_VERSION", 3)
+    connection = storage.connect(path)
+    try:
+        result = storage.migrate(connection, backup_dir=tmp_path / "backups")
+        assert result.applied_now == (3,)
+        # 非空库升版本必须留备份（备份内容本身由 test_migrate_backs_up_… 验）。
+        assert result.backup_path is not None and result.backup_path.is_file()
+
+        # 升级前的批次行还在，且新表能直接引用它（外键指向真实存在的行）。
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+        with storage.write_transaction(connection) as conn:
+            conn.execute(EVALUATION_INSERT, ("E1", "R1", 1, 1, 0, NOW))
+            conn.execute(EVALUATION_RECORD_INSERT, ("1", "回答正确", 1, "completed"))
+        with pytest.raises(sqlite3.IntegrityError):
+            # 引用一个不存在的批次：外键必须真的拦下来，而不是只写在 DDL 里。
+            with storage.write_transaction(connection) as conn:
+                conn.execute(EVALUATION_INSERT, ("E2", "没有这个批次", 1, 1, 0, NOW))
+        with pytest.raises(sqlite3.IntegrityError):
+            # 003 的口径：有预测就必须给出一致性（agent_label 与 agree 同生共死）。
+            with storage.write_transaction(connection) as conn:
+                conn.execute(EVALUATION_RECORD_INSERT, ("2", "回答正确", None, "completed"))
+        with pytest.raises(sqlite3.IntegrityError):
+            # 完成率的分子不能超过分母。
+            storage.execute_write(
+                connection, EVALUATION_INSERT, ("E3", "R1", 1, 2, 0, NOW)
+            )
     finally:
         connection.close()
 

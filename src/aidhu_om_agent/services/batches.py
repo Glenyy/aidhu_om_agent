@@ -681,7 +681,8 @@ RECENT_JOB_LIMIT = 10
 
 #: `model_config` 只取模型与已验证的非敏感参数：`config_snapshot` 里的本机绝对
 #: 路径与配置文件位置不属于接口合同，读接口不把它们发出去（[plan/08 §5]）。
-_MODEL_CONFIG_KEYS = ("stage1", "stage2", "execution")
+#: 评估的冻结清单（S07-03）取同一组键，两处必须一致，因此它是公开常量。
+MODEL_CONFIG_KEYS = ("stage1", "stage2", "execution")
 
 
 def counts_of(
@@ -768,9 +769,9 @@ def _execution_control(state: jobs_repo.RuntimeState) -> dict[str, Any]:
     }
 
 
-def _model_config(config_snapshot: dict[str, Any]) -> dict[str, Any]:
+def model_config_snapshot(config_snapshot: dict[str, Any]) -> dict[str, Any]:
     """批次创建时冻结的模型与执行参数；**凭据只以「是否存在」的形式出现**。"""
-    return {key: config_snapshot.get(key) for key in _MODEL_CONFIG_KEYS}
+    return {key: config_snapshot.get(key) for key in MODEL_CONFIG_KEYS}
 
 
 def list_batch_runs(
@@ -900,7 +901,7 @@ def run_detail(
                 "execution_control": _execution_control(
                     jobs_repo.get_runtime_state(snapshot)
                 ),
-                "model_config": _model_config(run.config_snapshot),
+                "model_config": model_config_snapshot(run.config_snapshot),
                 "versions": run.versions,
                 "last_error": run.last_error,
                 "allowed_actions": allowed_actions(snapshot, run_id),
@@ -1208,6 +1209,7 @@ def record_detail(database: Database, run_id: str, record_key: str) -> dict[str,
 __all__ = [
     "FAILURE_SUMMARY_LIMIT",
     "FINALIZE_ONLY_RUN_STATUSES",
+    "MODEL_CONFIG_KEYS",
     "NEW_BATCH_REQUIRED_CODES",
     "Q_PREVIEW_LENGTH",
     "RECENT_JOB_LIMIT",
@@ -1231,6 +1233,7 @@ __all__ = [
     "list_batch_runs",
     "list_run_records",
     "load_parsed_input",
+    "model_config_snapshot",
     "plan_resume",
     "record_detail",
     "resume_run",

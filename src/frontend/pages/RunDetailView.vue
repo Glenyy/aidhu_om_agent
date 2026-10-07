@@ -466,6 +466,7 @@ function stageText(stage: string | null): string {
               {{ detail.status }}
             </el-tag>
             <el-button class="refresh" :loading="loading" @click="load">立即刷新</el-button>
+            <el-button @click="router.push(`/runs/${runId}/evaluation`)">评估结果</el-button>
             <el-button @click="router.push('/runs')">返回列表</el-button>
           </div>
         </div>
